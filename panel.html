@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型路由 · cpa-router</title>
+<style>
+  :root {
+    /* Dark by default (user preference). This page runs inside an iframe, and
+       CSS custom properties do NOT cross that boundary: the host injects no
+       theme tokens, so these fallbacks are what actually render. Every token
+       still prefers the host value when one exists. A missing fallback would
+       make `color` fall back to the UA default, which flips with the OS theme —
+       that was the cause of the earlier white-on-white panel. */
+    color-scheme: dark;
+    --cpa-fg: var(--foreground, #e6edf3);
+    --cpa-muted-fg: var(--muted-foreground, #9aa7b4);
+    --cpa-border: var(--border, #2c3440);
+    --cpa-card: var(--card, #161b22);
+    --cpa-muted: var(--muted, #1b222c);
+    --cpa-accent: var(--accent, #2563eb);
+    --cpa-accent-fg: var(--accent-foreground, #ffffff);
+    /* A lighter accent for accent-coloured *text* on the dark surface: the fill
+       colour above is too dark to read as text, and this is too light to carry
+       white button labels. */
+    --cpa-accent-text: var(--accent, #58a6ff);
+    --cpa-bg: var(--background, #0d1117);
+    --cpa-danger: var(--destructive, #f87171);
+    --cpa-ok: #34d399;
+  }
+  body {
+    margin: 0; padding: 1.25rem 1.5rem; line-height: 1.5;
+    color: var(--cpa-fg); background: var(--cpa-bg);
+    font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+  .sub { color: var(--cpa-muted-fg); font-size: .85rem; }
+  .card {
+    border: 1px solid var(--cpa-border); background: var(--cpa-card);
+    border-radius: 10px; padding: .9rem 1rem; margin: .75rem 0;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .spacer { flex: 1; }
+  .badge {
+    display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem;
+    border: 1px solid var(--cpa-border); color: var(--cpa-muted-fg);
+  }
+  .badge.rr { color: var(--cpa-accent-text); border-color: var(--cpa-border); }
+  .badge.fb { color: var(--cpa-ok); border-color: var(--cpa-border); }
+  .member { font-size: .85rem; padding: .25rem 0; border-top: 1px dashed var(--cpa-border); }
+  .member:first-of-type { border-top: none; }
+  .cool { color: var(--cpa-danger); }
+  .ok { color: var(--cpa-ok); }
+  button, input, select {
+    font: inherit; padding: .35rem .6rem; border-radius: 8px;
+    border: 1px solid var(--cpa-border); background: var(--cpa-bg); color: var(--cpa-fg);
+  }
+  button { cursor: pointer; background: var(--cpa-accent); color: var(--cpa-accent-fg); border-color: transparent; }
+  button.ghost { background: transparent; color: var(--cpa-fg); border: 1px solid var(--cpa-border); }
+  button.danger { background: var(--cpa-danger); color: #2a1013; border-color: transparent; }
+  input[type=text], textarea, select { min-width: 14rem; }
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none;
+    align-items: center; justify-content: center; padding: 1rem; z-index: 10;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: var(--cpa-card); border: 1px solid var(--cpa-border); border-radius: 12px;
+    max-width: 640px; width: 100%; max-height: 90vh; overflow: auto; padding: 1.1rem 1.25rem;
+  }
+  .mrow { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; }
+  .mrow label { width: 7rem; color: var(--cpa-muted-fg); font-size: .85rem; }
+  .mrow input, .mrow select { flex: 1; }
+  .mrow .drag {
+    cursor: grab; color: var(--cpa-muted-fg); user-select: none;
+    padding: 0 .25rem; font-size: 1.1rem; line-height: 1;
+  }
+  .mrow .drag:active { cursor: grabbing; }
+  .mrow.dragging { opacity: .45; }
+  .banner {
+    padding: .6rem .8rem; border-radius: 8px; margin: .5rem 0; display: none;
+    border: 1px solid var(--cpa-border);
+  }
+  .banner.show { display: block; }
+  .banner.err { background: #3a1a1d; color: #fca5a5; border-color: #7f2d33; }
+  .banner.ok { background: #12291f; color: #6ee7b7; border-color: #1d5a41; }
+  pre {
+    background: var(--cpa-muted); color: var(--cpa-fg); padding: .6rem;
+    border-radius: 8px; overflow: auto; max-height: 16rem; white-space: pre-wrap; word-break: break-word;
+  }
+  details summary { cursor: pointer; color: var(--cpa-muted-fg); font-size: .85rem; }
+  .danger { color: var(--cpa-danger); }
+  table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+  td, th { border: 1px solid var(--cpa-border); padding: .3rem .5rem; text-align: left; }
+</style>
+</head>
+<body>
+  <h1>模型路由 · cpa-router</h1>
+  <div class="sub" id="meta">插件版本 0.1.0</div>
+  <div id="keyState" class="sub"></div>
+
+  <div id="banner" class="banner"></div>
+
+  <div class="card">
+    <div class="row">
+      <button id="refresh">刷新</button>
+      <button class="ghost" id="newGroup">新建组</button>
+      <span class="spacer"></span>
+      <span class="sub" id="fileInfo"></span>
+    </div>
+    <details style="margin-top:.5rem;">
+      <summary>生效配置</summary>
+      <pre id="cfg"></pre>
+    </details>
+  </div>
+
+  <h2>组</h2>
+  <div id="groups"></div>
+
+  <h2>测试</h2>
+  <div class="card">
+    <div class="mrow">
+      <label>组</label>
+      <select id="testGroup"></select>
+    </div>
+    <div class="mrow">
+      <label>prompt</label>
+      <input type="text" id="testPrompt" value="只回复两个字:收到" style="flex:1;">
+    </div>
+    <div class="mrow">
+      <label></label>
+      <button id="testRun">发送</button>
+    </div>
+    <pre id="testOut" style="display:none;"></pre>
+  </div>
+
+  <!-- Edit modal -->
+  <div class="modal-bg" id="modal">
+    <div class="modal">
+      <h2 style="margin-top:0;" id="modalTitle">新建组</h2>
+      <div class="mrow"><label>name</label><input type="text" id="f_name"></div>
+      <div class="mrow"><label>aliases</label><input type="text" id="f_aliases" placeholder="逗号分隔"></div>
+      <div class="mrow"><label>strategy</label>
+        <select id="f_strategy"><option value="fallback">fallback</option><option value="round-robin">round-robin</option></select>
+      </div>
+      <div class="mrow"><label>description</label><input type="text" id="f_desc"></div>
+      <div class="mrow"><label>enabled</label><input type="checkbox" id="f_enabled" checked></div>
+      <h2>成员 <span class="sub" id="pickHint"></span></h2>
+      <div class="sub" style="margin:-.3rem 0 .4rem;">顺序 = fallback 组的尝试顺序(轮询组决定轮询起点);拖动左侧 ⠿ 可调整</div>
+      <div id="members"></div>
+      <datalist id="dl-models"></datalist>
+      <datalist id="dl-groups"></datalist>
+      <button class="ghost" id="addMember">添加成员</button>
+      <div class="row" style="margin-top:1rem;">
+        <span class="spacer"></span>
+        <button class="ghost" id="cancel">取消</button>
+        <button id="save">保存</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const ENC_PREFIX = "enc::v1::";
+const SECRET_SALT = "cli-proxy-api-webui::secure-storage";
+const PANEL_STORE = "cli-proxy-auth";
+const SS_KEY = "cpa-router-mgmt-key";
+function _enc(t){return new TextEncoder().encode(t)}
+function _dec(b){return new TextDecoder().decode(b)}
+function _keyBytes(){try{return _enc(SECRET_SALT+"|"+window.location.host+"|"+navigator.userAgent)}catch(e){return _enc(SECRET_SALT)}}
+function _xor(d,k){const r=new Uint8Array(d.length);for(let i=0;i<d.length;i++)r[i]=d[i]^k[i%k.length];return r}
+function _b64d(s){const bin=atob(s);const b=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return b}
+function deobfuscate(p){if(!p||!p.startsWith(ENC_PREFIX))return p;try{return _dec(_xor(_b64d(p.slice(ENC_PREFIX.length)),_keyBytes()))}catch(e){return p}}
+function isEmbedded(){try{return window.self!==window.top}catch(e){return false}}
+function readPanelKey(){
+  if(!isEmbedded())return null;
+  let raw;try{raw=localStorage.getItem(PANEL_STORE)}catch(e){return null}
+  if(!raw)return null;
+  try{
+    const parsed=JSON.parse(deobfuscate(raw));
+    const st=(parsed&&parsed.state)||parsed||{};
+    return typeof st.managementKey==="string"&&st.managementKey?st.managementKey:null;
+  }catch(e){return null}
+}
+function readUrlKey(){const m=new URLSearchParams(window.location.search).get("key");if(m){history.replaceState(null,"",window.location.pathname)}return m}
+// An explicitly cleared key must stay cleared for this tab; otherwise getKey()
+// would immediately fall back to the embedded panel's localStorage key again and
+// a wrong key the user typed could never be undone.
+const SS_CLEARED = "cpa-router-mgmt-key-cleared";
+function getKey(){
+  try{ if(sessionStorage.getItem(SS_CLEARED)==="1") return null; }catch(e){}
+  return sessionStorage.getItem(SS_KEY)||readPanelKey()||readUrlKey();
+}
+function forgetKey(){try{sessionStorage.removeItem(SS_KEY);sessionStorage.setItem(SS_CLEARED,"1");}catch(e){}}
+function setKey(k){try{sessionStorage.removeItem(SS_CLEARED);sessionStorage.setItem(SS_KEY,k);}catch(e){} render();}
+function clearKey(){forgetKey(); render();}
+
+// The host may inject no theme tokens at all into this iframe. The panel is dark
+// by default, so pin the matching scheme when there is no host theme — otherwise
+// UA-styled form controls would follow the OS preference and clash with the
+// panel surface.
+function pinColorScheme(){
+  try{
+    const bg=getComputedStyle(document.documentElement).getPropertyValue("--background").trim();
+    document.documentElement.style.colorScheme = bg ? "light dark" : "dark";
+  }catch(e){}
+}
+// The host mounts plugin management routes under /v0/management (verified against
+// CLIProxyAPI v8.0.13), so every API call must carry that prefix.
+const MGMT_BASE="/v0/management";
+function api(path, method, body){
+  const key=getKey();
+  const opts={method, headers:{}};
+  if(body!==undefined){opts.headers["Content-Type"]="application/json";opts.body=JSON.stringify(body);}
+  if(key)opts.headers["Authorization"]="Bearer "+key;
+  return fetch(MGMT_BASE+path,{...opts, headers:opts.headers});
+}
+function banner(msg, isErr){
+  const b=document.getElementById("banner");
+  b.textContent=msg; b.className="banner show "+(isErr?"err":"ok");
+  setTimeout(()=>b.className="banner",4000);
+}
+function renderKeyState(){
+  const ks=document.getElementById("keyState");
+  ks.innerHTML="";
+  if(getKey()){
+    const s=document.createElement("span"); s.textContent="管理密钥：已就绪";
+    const b=document.createElement("button"); b.className="ghost"; b.textContent="清除密钥";
+    b.style.marginLeft=".5rem";
+    b.onclick=()=>{clearKey(); banner("已清除本页保存的密钥",false);};
+    ks.appendChild(s); ks.appendChild(b);
+  } else {
+    const s=document.createElement("span"); s.className="cool";
+    s.textContent="未获取到管理密钥：在 CPA 管理面板中打开本页可自动获取；否则请在下方填入：";
+    const i=document.createElement("input"); i.type="text"; i.id="keyInput"; i.style.marginLeft=".5rem";
+    const b=document.createElement("button"); b.textContent="保存密钥";
+    b.onclick=()=>{const v=i.value.trim();if(v)setKey(v);};
+    ks.appendChild(s); ks.appendChild(i); ks.appendChild(b);
+  }
+}
+async function render(){
+  pinColorScheme();
+  renderKeyState();
+  try{
+    const r=await api("/plugins/cpa-router/state","GET");
+    if(r.status===401||r.status===403){
+      // A wrong key must not be a dead end: drop it and offer the input again.
+      forgetKey();
+      renderKeyState();
+      banner("管理密钥无效或未授权，已清除已保存的密钥，请重新输入",true);
+      return;
+    }
+    if(!r.ok) throw new Error("管理接口返回 HTTP "+r.status);
+    const s=await r.json();
+    if(!s||!s.state_file) throw new Error("管理接口返回内容异常");
+    document.getElementById("fileInfo").textContent="状态文件: "+(s.state_file.path||"(内存模式)")+" · 存在:"+s.state_file.exists;
+    document.getElementById("cfg").textContent=JSON.stringify(s.config,null,2);
+    const gl=document.getElementById("groups"); gl.innerHTML="";
+    (s.groups||[]).forEach(g=>gl.appendChild(groupCard(g,s.models)));
+    const tg=document.getElementById("testGroup"); tg.innerHTML="";
+    (s.groups||[]).forEach(g=>{const o=document.createElement("option");o.value=g.call_name;o.textContent=g.call_name;tg.appendChild(o);});
+    GROUP_NAMES = (s.groups||[]).map(g=>g.call_name).filter(Boolean);
+    refreshDatalists();
+  }catch(e){ banner("加载状态失败: "+(e.message||e), true); }
+}
+function groupCard(g, models){
+  const c=document.createElement("div"); c.className="card";
+  const strat=g.strategy==="round-robin"
+    ? '<span class="badge rr">轮询</span>' : '<span class="badge fb">降级</span>';
+  const en=g.enabled?'<span class="ok">● 启用</span>':'<span class="cool">○ 禁用</span>';
+  let html='<div class="row"><strong>'+esc(g.name)+'</strong> <span class="sub">'+esc(g.call_name||"")+'</span> '+strat+' <span class="spacer"></span> '+en+'</div>';
+  if(g.description)html+='<div class="sub">'+esc(g.description)+'</div>';
+  html+='<div class="sub">组请求 '+n(g.group_total)+' / 成功 '+n(g.group_ok)+' / 失败 '+n(g.group_fail)+'</div>';
+  (g.members||[]).forEach(m=>{
+    const ms=models&&models[m.name]?models[m.name]:null;
+    let extra="";
+    if(ms){
+      if(ms.cooldown_secs>0)extra='<span class="cool"> 冷却 '+ms.cooldown_secs+'s</span>';
+      extra+=' <span class="sub">总'+(ms.total||0)+'/成'+(ms.ok||0)+'/败'+(ms.fail||0)+'</span>';
+    }
+    html+='<div class="member">['+m.type+'] '+esc(m.name)+' '+(m.enabled?'':'<span class="cool">禁用</span>')+extra+'</div>';
+  });
+  c.innerHTML=html;
+  const row=document.createElement("div"); row.className="row"; row.style.marginTop=".5rem";
+  row.appendChild(btn("编辑",()=>editGroup(g),"ghost"));
+  row.appendChild(btn("删除",null,"danger"));
+  row.appendChild(btn("重置冷却",()=>doReset(g.name,"cooldown"),"ghost"));
+  row.appendChild(btn("测试",()=>{document.getElementById("testGroup").value=g.call_name;document.getElementById("testPrompt").scrollIntoView();},"ghost"));
+  c.appendChild(row);
+  // wire delete
+  row.children[1].onclick=async()=>{ if(!confirm("删除组 "+g.name+"?"))return; const r=await api("/plugins/cpa-router/groups?name="+encodeURIComponent(g.name),"DELETE"); const j=await r.json(); if(j.ok)render(); else banner(j.error||"删除失败",true); };
+  return c;
+}
+function btn(label,fn,cls){const b=document.createElement("button");b.textContent=label;if(cls)b.className=cls;b.onclick=(typeof fn==="function")?fn:()=>{};return b;}
+function n(v){return v==null?0:v;}
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
+
+async function doReset(name,what){
+  const r=await api("/plugins/cpa-router/reset","POST",{name,what});
+  const j=await r.json();
+  if(j.ok){banner("已重置 "+j.cleared+" 项",false);render();}
+  else banner(j.error||"重置失败",true);
+}
+
+// ---- name pickers (datalists) ----
+// Member names can be picked from a list instead of typed. Model names come from
+// the host's runtime model catalog, which is management-key authenticated and
+// matches what /v1/models actually serves; group names come from this plugin's
+// own state. Both are suggestions only — a name not in the list can still be
+// typed, so the picker never blocks a valid value.
+let MODEL_NAMES = [];
+let GROUP_NAMES = [];
+let modelNamesState = "idle"; // idle | loading | done
+
+async function loadModelNames(){
+  const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
+  // Primary: the host's runtime catalog.
+  try{
+    const r = await api("/model-prices/runtime-models","GET");
+    if(r.ok){
+      const j = await r.json();
+      if(j && Array.isArray(j.models) && j.models.length){ MODEL_NAMES = uniq(j.models); return true; }
+    }
+  }catch(e){}
+  // Fallback: derive from the config. This can also list models that are
+  // configured but not currently served, which is still useful for building a group.
+  try{
+    const r = await api("/config","GET");
+    if(r.ok){
+      const c = await r.json(); const out = [];
+      for(const ch of c["openai-compatibility"]||[]) for(const m of (ch.models||[])) out.push(m.alias||m.name);
+      for(const sec of ["gemini-api-key","claude-api-key","codex-api-key","xai-api-key","meta-api-key","interactions-api-key","vertex-api-key"])
+        for(const e of (c[sec]||[])) for(const m of (e.models||[])) out.push(typeof m==="string"?m:(m.alias||m.name));
+      const oma = c["oauth-model-alias"]||{};
+      for(const k of Object.keys(oma)) for(const m of (oma[k]||[])){ out.push(m.alias); if(m.fork) out.push(m.name); }
+      MODEL_NAMES = uniq(out); return MODEL_NAMES.length > 0;
+    }
+  }catch(e){}
+  return false;
+}
+function refreshDatalists(){
+  const fill=(id,vals)=>{ const dl=document.getElementById(id); if(!dl)return; dl.innerHTML="";
+    vals.forEach(v=>{const o=document.createElement("option");o.value=v;dl.appendChild(o);}); };
+  fill("dl-models", MODEL_NAMES);
+  fill("dl-groups", GROUP_NAMES);
+  const hint=document.getElementById("pickHint");
+  if(hint) hint.textContent = MODEL_NAMES.length || GROUP_NAMES.length
+    ? "模型 "+MODEL_NAMES.length+" 个 / 组 "+GROUP_NAMES.length+" 个（名称框可下拉选择）"
+    : "";
+}
+function ensureModelNames(){
+  if(modelNamesState !== "idle") return;
+  modelNamesState = "loading";
+  loadModelNames().then(ok=>{ modelNamesState = ok ? "done" : "idle"; refreshDatalists(); },
+                        ()=>{ modelNamesState = "idle"; });
+}
+function memberListId(type){ return type==="group" ? "dl-groups" : "dl-models"; }
+
+// ---- edit modal ----
+let editingName=null;
+let dragRow=null;   // the member row currently being dragged
+function openModal(g){
+  editingName = g?g.name:null;
+  document.getElementById("modalTitle").textContent = g?"编辑组: "+g.name:"新建组";
+  document.getElementById("f_name").value = g?g.name:"";
+  document.getElementById("f_aliases").value = g&&g.aliases?g.aliases.join(","):"";
+  document.getElementById("f_strategy").value = g?g.strategy:"fallback";
+  document.getElementById("f_desc").value = g?g.description:"";
+  document.getElementById("f_enabled").checked = g?g.enabled:true;
+  const mc=document.getElementById("members"); mc.innerHTML="";
+  if(g&&g.members){g.members.forEach(m=>addMemberRow(m.type,m.name,m.enabled));}
+  else addMemberRow("model","",true);
+  ensureModelNames();
+  refreshDatalists();
+  document.getElementById("modal").className="modal-bg show";
+}
+function addMemberRow(type,name,enabled){
+  const mc=document.getElementById("members");
+  const r=document.createElement("div"); r.className="mrow";
+  // Drag handle. Order matters: a fallback group tries members in declaration
+  // order, and it sets the round-robin starting point.
+  const handle=document.createElement("span");
+  handle.className="drag"; handle.textContent="⠿"; handle.title="拖动调整顺序"; handle.draggable=true;
+  handle.ondragstart=e=>{
+    dragRow=r; r.classList.add("dragging");
+    if(e.dataTransfer){ e.dataTransfer.effectAllowed="move"; try{e.dataTransfer.setData("text/plain","");}catch(_){} }
+  };
+  handle.ondragend=()=>{ r.classList.remove("dragging"); dragRow=null; };
+  const sel=document.createElement("select"); sel.className="m-type";
+  sel.innerHTML='<option value="model">模型</option><option value="group">组</option>';
+  sel.value=type||"model";
+  const inp=document.createElement("input"); inp.type="text"; inp.className="m-name"; inp.value=name||"";
+  // Point the name box at the matching datalist so names can be picked; typing a
+  // name that is not in the list still works.
+  const sync=()=>{
+    const isGroup = sel.value==="group";
+    inp.setAttribute("list", memberListId(sel.value));
+    inp.placeholder = isGroup ? "下拉选组，或手填组名" : "下拉选模型，或手填模型名";
+  };
+  sel.onchange=sync; sync();
+  const en=document.createElement("input"); en.type="checkbox"; en.className="m-enabled"; en.checked=enabled!==false;
+  const del=document.createElement("button"); del.className="ghost"; del.textContent="删除";
+  del.onclick=()=>r.remove();
+  // Live reorder: move the dragged row as the cursor crosses another row's midpoint.
+  r.ondragover=e=>{
+    if(!dragRow||dragRow===r)return;
+    e.preventDefault();
+    if(e.dataTransfer) e.dataTransfer.dropEffect="move";
+    const rect=r.getBoundingClientRect();
+    mc.insertBefore(dragRow, (e.clientY-rect.top) > rect.height/2 ? r.nextSibling : r);
+  };
+  r.ondrop=e=>e.preventDefault();
+  r.appendChild(handle); r.appendChild(sel); r.appendChild(inp); r.appendChild(en); r.appendChild(del);
+  mc.appendChild(r);
+}
+function editGroup(g){openModal(g);}
+document.getElementById("newGroup").onclick=()=>openModal(null);
+document.getElementById("cancel").onclick=()=>{document.getElementById("modal").className="modal-bg";};
+document.getElementById("addMember").onclick=()=>addMemberRow("model","",true);
+document.getElementById("save").onclick=async()=>{
+  const name=document.getElementById("f_name").value.trim();
+  if(!name){banner("name 不能为空",true);return;}
+  const aliases=document.getElementById("f_aliases").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const members=[];
+  // Read by class, not child index: the drag handle sits first in the row, so
+  // positional access would silently read the wrong elements.
+  document.querySelectorAll("#members .mrow").forEach(r=>{
+    const val=(r.querySelector(".m-name").value||"").trim();
+    if(!val)return;
+    const type=r.querySelector(".m-type").value;
+    const en=r.querySelector(".m-enabled").checked;
+    members.push(type==="group"?{group:val,enabled:en}:{model:val,enabled:en});
+  });
+  const group={name,strategy:document.getElementById("f_strategy").value,enabled:document.getElementById("f_enabled").checked,description:document.getElementById("f_desc").value,aliases,members};
+  const r=await api("/plugins/cpa-router/groups","POST",{group});
+  const j=await r.json();
+  if(j.ok){
+    document.getElementById("modal").className="modal-bg";
+    banner("已保存，正在刷新模型列表…",false);
+    // 5. notify host to re-register models (best-effort)
+    try{await fetch("/v0/management/plugins/cpa-router/config",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({revision:String(Date.now())})});}catch(e){}
+    render();
+  } else banner(j.error||"保存失败",true);
+};
+
+// ---- test ----
+// Render the real per-attempt trace instead of dumping raw JSON, so it is
+// obvious which member was tried, with what status and cooldown.
+function renderTestResult(j){
+  const out=document.getElementById("testOut");
+  out.innerHTML="";
+  const head=document.createElement("div");
+  head.className = j.ok ? "ok" : "cool";
+  head.textContent = (j.ok?"✔ 成功":"✘ 失败")
+    + " · 状态 " + (j.status||"?")
+    + " · 耗时 " + (j.latency_ms==null?"?":j.latency_ms+"ms");
+  out.appendChild(head);
+
+  const atts=j.attempts||[];
+  if(atts.length){
+    atts.forEach((a,i)=>{
+      const line=document.createElement("div");
+      line.className="sub";
+      let t="  "+(i+1)+". "+a.member+" → "+((a.status&&a.status>0)?a.status:"错误");
+      if(a.latency_ms) t+=" · "+a.latency_ms+"ms";
+      if(a.cooldown_s>0) t+=" · 冷却 "+a.cooldown_s+"s";
+      if(a.error) t+=" · "+a.error;
+      line.textContent=t;
+      out.appendChild(line);
+    });
+  } else {
+    const none=document.createElement("div"); none.className="sub";
+    none.textContent="  (没有发出任何尝试)";
+    out.appendChild(none);
+  }
+  if(j.error){
+    const e=document.createElement("div"); e.className="cool";
+    e.textContent="错误: "+j.error; out.appendChild(e);
+  }
+  if(j.body_preview){
+    const p=document.createElement("pre");
+    p.textContent=String(j.body_preview).slice(0,500);
+    out.appendChild(p);
+  }
+}
+document.getElementById("testRun").onclick=async()=>{
+  const group=document.getElementById("testGroup").value;
+  const prompt=document.getElementById("testPrompt").value;
+  if(!group){banner("请先选择组",true);return;}
+  const out=document.getElementById("testOut"); out.style.display="block"; out.textContent="请求中…";
+  const r=await api("/plugins/cpa-router/test","POST",{group,prompt,stream:false});
+  const j=await r.json();
+  renderTestResult(j);
+  if(!j.ok && j.error) banner(j.error,true);
+  else banner("测试完成，状态码 "+(j.status||"?"),false);
+  render();
+};
+
+document.getElementById("refresh").onclick=render;
+render();
+</script>
+</body>
+</html>
