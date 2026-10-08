@@ -1,7 +1,7 @@
 // §5.3 交互测试（Node，无浏览器）
 //
 // 读 panel.html，抽出 <script> 块，在 vm 沙箱里用一个假 DOM 跑起来，然后驱动
-// 「新建组 / 编辑组 -> 保存」的真实路径，断言真正 POST 出去的 body。
+// 「新建组 / 编辑组 -> 选择成员 -> 保存」的真实路径，断言真正 POST 出去的 body。
 //
 // 运行：node scripts/panel-member-pick.test.mjs
 // 失败退出码非 0，并打印 PASS n / FAIL m。
@@ -69,6 +69,7 @@ class Element {
     this._classes = new Set();
     this.value = "";
     this.checked = false;
+    this.disabled = false;
     this.draggable = false;
     this.type = "";
     this.id = "";
@@ -105,9 +106,8 @@ class Element {
     this._text = String(v);
   }
   get innerHTML() { return this._html; }
-  // 注意：假 DOM 不解析 HTML 字符串。写在 innerHTML 里的 <option> 不会变成
-  // children；要数选项时用下面的 optionCount()（children + innerHTML 里的
-  // <option> 一起算）。
+  // 注意：假 DOM 不解析 HTML 字符串。写在 innerHTML 里的元素不会变成 children；
+  // 选择弹窗里的 chip 因此必须用 createElement + onclick 属性创建。
   set innerHTML(v) {
     this.children.forEach((c) => { c.parentNode = null; });
     this.children = [];
@@ -150,14 +150,6 @@ class Element {
   focus() {}
   blur() {}
   scrollIntoView() {}
-}
-
-// 一个 datalist 的真实选项数：假 DOM 不解析 innerHTML 字符串，所以 children
-// 之外还要算 innerHTML 里声明的 <option>。
-function optionCount(el) {
-  const fromChildren = el.children.filter((c) => c.tagName === "OPTION").length;
-  const fromHtml = (el.innerHTML.match(/<option/g) || []).length;
-  return fromChildren + fromHtml;
 }
 
 const byId = new Map();
@@ -320,7 +312,10 @@ const els = {
   newGroup: document.getElementById("newGroup"),
   save: document.getElementById("save"),
   members: document.getElementById("members"),
-  dlMembers: document.getElementById("dl-members"),
+  addMember: document.getElementById("addMember"),
+  pickSearch: document.getElementById("pickSearch"),
+  pickDone: document.getElementById("pickDone"),
+  pickList: document.getElementById("pickList"),
 };
 
 function groupPosts() {
@@ -333,17 +328,30 @@ function lastGroupBody() {
   if (!posts.length) throw new Error("没有捕获到 POST /plugins/cpa-router/groups");
   return JSON.parse(posts[posts.length - 1].opts.body);
 }
-function setFirstMemberName(v) {
-  const row = els.members.children[0];
-  if (!row) throw new Error("成员区没有成员行");
-  const inp = row.querySelector(".m-name");
-  if (!inp) throw new Error("成员行里找不到 .m-name 输入框");
-  inp.value = v;
+function pickChips() {
+  return document.querySelectorAll("#pickList .pickchip");
+}
+function chipByName(name) {
+  return pickChips().find((c) => c.dataset.name === name) || null;
+}
+function memberRows() {
+  return els.members.children.filter((c) => c.classList.contains("mrow"));
 }
 function openNewGroup() {
   els.newGroup.onclick();
   // 保存要求组名非空；否则会在写请求前就 return。
   document.getElementById("f_name").value = "panel-test-group";
+}
+// 新建组 -> 等模型目录加载 -> 打开选择弹窗 -> 等渲染。
+async function preparePicker() {
+  openNewGroup();
+  await flush();
+  els.addMember.onclick();
+  await flush();
+}
+function searchFor(v) {
+  els.pickSearch.value = v;
+  els.pickSearch.oninput();
 }
 function deepEq(actual, expected) {
   const a = JSON.stringify(actual);
@@ -370,27 +378,32 @@ async function run(name, fn) {
 
 await flush();
 
-await run("统一 datalist 有候选（含组调用名 smart）", async () => {
-  await flush();
-  const count = optionCount(els.dlMembers);
-  if (count < 1) throw new Error("dl-members 里没有任何候选");
-  const values = els.dlMembers.children
-    .filter((c) => c.tagName === "OPTION")
-    .map((c) => c.value);
-  if (!values.includes("smart")) throw new Error("dl-members 候选里没有组调用名 smart: " + JSON.stringify(values));
+await run("选择弹窗候选里含组调用名 smart", async () => {
+  await preparePicker();
+  const names = pickChips().map((c) => c.dataset.name);
+  if (!names.includes("smart")) throw new Error("候选里没有组调用名 smart: " + JSON.stringify(names));
+  els.pickDone.onclick();
 });
 
-await run("成员填组调用名 smart -> POST body 里是 {group:'smart',enabled:true}", async () => {
-  openNewGroup();
-  setFirstMemberName("smart");
+await run("搜 smart 选 chip -> POST body 里是 {group:'smart',enabled:true}", async () => {
+  await preparePicker();
+  searchFor("smart");
+  const chip = chipByName("smart");
+  if (!chip) throw new Error("搜索 smart 后没有 smart chip");
+  chip.onclick();
+  els.pickDone.onclick();
   await els.save.onclick();
   await flush();
   deepEq(lastGroupBody().group.members[0], { group: "smart", enabled: true });
 });
 
-await run("成员填模型名 ink/glm-5.3 -> POST body 里是 {model:'ink/glm-5.3',enabled:true}", async () => {
-  openNewGroup();
-  setFirstMemberName("ink/glm-5.3");
+await run("搜 ink/glm-5.3 选 chip -> POST body 里是 {model:'ink/glm-5.3',enabled:true}", async () => {
+  await preparePicker();
+  searchFor("ink/glm-5.3");
+  const chip = chipByName("ink/glm-5.3");
+  if (!chip) throw new Error("搜索 ink/glm-5.3 后没有对应 chip");
+  chip.onclick();
+  els.pickDone.onclick();
   await els.save.onclick();
   await flush();
   deepEq(lastGroupBody().group.members[0], { model: "ink/glm-5.3", enabled: true });
@@ -401,10 +414,35 @@ await run("编辑含 {group:'GLM'} 的组、原样保存 -> 该成员仍是 {gro
   if (!wrapper) throw new Error("样本里缺少 wrapper 组");
   if (typeof sandbox.openModal !== "function") throw new Error("沙箱里拿不到 openModal()");
   sandbox.openModal(wrapper);
+  await flush();
   // 什么都不改，直接保存
   await els.save.onclick();
   await flush();
   deepEq(lastGroupBody().group.members[0], { group: "GLM", enabled: true });
+});
+
+await run("两行成员点第二行 ↑ -> 保存后 members 顺序反转", async () => {
+  const two = {
+    name: "two", call_name: "two", strategy: "fallback", enabled: true,
+    description: "", aliases: [],
+    members: [
+      { type: "model", name: "ink/glm-5.3", enabled: true },
+      { type: "group", name: "GLM", enabled: true },
+    ],
+  };
+  sandbox.openModal(two);
+  await flush();
+  const rows = memberRows();
+  if (rows.length !== 2) throw new Error("期望两行成员，实际 " + rows.length);
+  const up = rows[1].querySelector(".up");
+  if (!up) throw new Error("第二行没有 .up 按钮");
+  up.onclick();
+  await els.save.onclick();
+  await flush();
+  deepEq(lastGroupBody().group.members, [
+    { group: "GLM", enabled: true },
+    { model: "ink/glm-5.3", enabled: true },
+  ]);
 });
 
 console.log(`PASS ${pass} / FAIL ${fail}`);

@@ -181,21 +181,88 @@
     background: var(--cpa-card); border-top: 1px solid var(--cpa-border);
     display: flex; gap: .5rem; align-items: center;
   }
-  .mrow { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; }
-  .mrow input[type=text], .mrow select { flex: 1; min-width: 0; }
+  .mrow {
+    display: flex; gap: .4rem; align-items: center; margin: .4rem 0;
+    padding: .15rem .2rem; border-radius: 8px;
+  }
+  .mrow:hover { background: var(--cpa-muted); }
   .mrow .drag {
     cursor: grab; color: var(--cpa-muted-fg); user-select: none;
-    padding: 0 .25rem; font-size: 1.1rem; line-height: 1;
+    padding: 0 .2rem; font-size: 1.1rem; line-height: 1;
   }
   .mrow .drag:active { cursor: grabbing; }
   .mrow.dragging { opacity: .45; }
-  /* Read-only member type badge: it follows the typed name, there is no dropdown. */
+  .mrow .idx {
+    min-width: 1.3rem; text-align: right; color: var(--cpa-muted-fg);
+    font-size: .78rem; font-variant-numeric: tabular-nums;
+  }
+  /* Read-only member type badge: it follows the name, there is no dropdown. */
   .mrow .m-kind {
     min-width: 2.8rem; text-align: center; font-size: .72rem;
-    padding: .1rem .35rem; border-radius: 999px;
+    padding: .1rem .35rem; border-radius: 999px; white-space: nowrap;
     border: 1px solid var(--cpa-border); color: var(--cpa-muted-fg);
   }
   .mrow .m-kind.group { color: var(--cpa-accent-text); }
+  /* The name is plain text now: long ids ellipsize, but the column prefers to
+     keep ~24 characters visible before it gives space away. */
+  .mrow .m-name {
+    flex: 1 1 12rem; min-width: 0; font-size: .82rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mrow .m-enabled { flex: 0 0 auto; }
+  .mrow .icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 24px; min-height: 24px; padding: 0 .3rem; line-height: 1;
+    font-size: .85rem;
+  }
+  .mrow .del.danger-text { color: var(--cpa-danger); }
+  .mrow .icon:disabled { opacity: .35; }
+  #addMember {
+    width: 100%; margin-top: .5rem;
+    border: 1px dashed var(--cpa-border); background: transparent;
+    color: var(--cpa-muted-fg);
+  }
+  #addMember:hover { border-color: var(--cpa-hover); color: var(--cpa-fg); }
+
+  /* ---- member picker modal (§2) ---- */
+  #pickModal .modal { max-width: 620px; }
+  .pickhint {
+    border: 1px solid rgba(245,158,11,.55); background: rgba(245,158,11,.08);
+    color: #fcd34d; border-radius: 8px; padding: .45rem .6rem;
+    font-size: .82rem; margin: .2rem 0 .6rem;
+  }
+  #pickSearch { width: 100%; min-width: 0; margin-bottom: .6rem; }
+  #pickList { max-height: 50vh; overflow: auto; padding-bottom: .4rem; }
+  .pickhead { display: flex; align-items: center; gap: .5rem; margin-bottom: .4rem; }
+  .pgroup { border: 1px solid var(--cpa-border); border-radius: 8px; margin: 0 0 .5rem; }
+  .pghead {
+    display: flex; align-items: center; gap: .4rem; padding: .35rem .55rem;
+    font-size: .78rem; color: var(--cpa-muted-fg); cursor: pointer;
+    border-bottom: 1px solid var(--cpa-border);
+  }
+  .pgbadge {
+    font-family: var(--cpa-mono); font-size: .68rem; letter-spacing: .02em;
+    padding: .05rem .35rem; border-radius: 6px;
+    border: 1px solid var(--cpa-border); color: var(--cpa-muted-fg);
+  }
+  .pgname { color: var(--cpa-fg); }
+  .pgcount { color: var(--cpa-muted-fg); opacity: .75; }
+  .pgfold { margin-left: auto; padding: 0 .4rem; min-height: 22px; font-size: .72rem; }
+  .pickchips { display: flex; flex-wrap: wrap; gap: .35rem; padding: .5rem .55rem; }
+  .pgroup.folded .pickchips { display: none; }
+  .pickchip {
+    font-family: var(--cpa-mono); font-size: .74rem; max-width: 100%;
+    padding: .2rem .5rem; border-radius: 999px;
+    border: 1px solid var(--cpa-border); background: transparent; color: var(--cpa-fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pickchip:hover { border-color: var(--cpa-hover); }
+  .pickchip.on {
+    background: var(--cpa-accent); color: var(--cpa-accent-fg); border-color: transparent;
+  }
+  .pickchip.manual { border-style: dashed; }
+  .pickfoot { display: flex; align-items: center; gap: .5rem; margin-top: .7rem; }
+  .pickcount { color: var(--cpa-muted-fg); font-size: .82rem; }
 
   /* ---- banner & toasts ---- */
   .banner {
@@ -239,7 +306,7 @@
   <header id="topbar">
     <div class="brand">
       <h1>模型路由</h1>
-      <span class="chip" id="verChip">v0.2.1</span>
+      <span class="chip" id="verChip">v0.3.0</span>
       <span class="sub" id="counts"></span>
     </div>
     <div class="top-actions">
@@ -321,12 +388,30 @@
       <h2>成员 <span class="sub" id="pickHint"></span></h2>
       <div class="sub" style="margin:-.3rem 0 .4rem;">名字是组就按组嵌套，是模型就按模型调用；顺序 = fallback 组的尝试顺序（轮询组决定轮询起点）</div>
       <div id="members" class="mlist"></div>
-      <datalist id="dl-members"></datalist>
-      <button class="ghost" id="addMember">添加成员</button>
+      <button class="ghost" id="addMember" type="button">＋ 添加成员</button>
       <div class="mfoot">
         <span class="spacer"></span>
         <button class="ghost" id="cancel">取消</button>
         <button id="save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Member picker modal (§2) -->
+  <div class="modal-bg" id="pickModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pickTitle">
+      <div class="pickhead">
+        <h2 style="margin:0;" id="pickTitle">将成员添加到组</h2>
+        <span class="spacer"></span>
+        <button type="button" class="ghost icon" id="pickClose" title="关闭（Esc）">✕</button>
+      </div>
+      <div class="pickhint">ⓘ 点击添加，再次点击移除；关闭本窗口后点外层「保存」才会生效。</div>
+      <input type="search" id="pickSearch" placeholder="搜索模型 / 组…" autocomplete="off" aria-label="搜索候选">
+      <div id="pickList"></div>
+      <div class="pickfoot">
+        <span class="pickcount" id="pickCount">已选 0 个</span>
+        <span class="spacer"></span>
+        <button id="pickDone" type="button" class="ghost">完成</button>
       </div>
     </div>
   </div>
@@ -465,7 +550,7 @@ async function render(){
     document.getElementById("ovMembers").textContent=String(memberSum);
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.2.1");
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.3.0");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -626,11 +711,11 @@ async function doReset(name,what){
   else toast(j.error||"重置失败",true);
 }
 
-// ---- member name picker (datalist) ----
-// A single picker serves every member. Candidates are the host's runtime model
-// catalog plus this plugin's own groups (call name, prefixed alias, internal
-// name). Picking a group nests it; picking anything else calls it as a model.
-// Names not in the list can still be typed, so the picker never blocks a value.
+// ---- member name candidates ----
+// The picker's candidates are the host's runtime model catalog plus this
+// plugin's own groups (call name, prefixed alias, internal name). Picking a
+// group nests it; picking anything else calls it as a model. Free-typed names
+// are still accepted through the picker's manual-add chip, so it never blocks a value.
 async function loadModelNames(){
   const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
   // Primary: the host's runtime catalog.
@@ -672,22 +757,24 @@ function collectGroupPicks(groups, prefix){
 function memberTypeOf(name){ return GROUP_PICKS.includes(String(name||"").trim()) ? "group" : "model"; }
 function memberPayload(name, enabled){ return memberTypeOf(name)==="group" ? {group:name,enabled:enabled} : {model:name,enabled:enabled}; }
 function refreshDatalists(){
-  const dl=document.getElementById("dl-members");
-  if(dl){
-    dl.innerHTML="";
-    [...new Set([...MODEL_PICKS,...GROUP_PICKS])].filter(Boolean).sort()
-      .forEach(v=>{const o=document.createElement("option");o.value=v;dl.appendChild(o);});
-  }
   const hint=document.getElementById("pickHint");
   if(hint) hint.textContent = (MODEL_PICKS.length || GROUP_PICKS.length)
-    ? "模型 "+MODEL_PICKS.length+" 个 / 组 "+GROUP_PICKS.length+" 个（名称框可下拉选择）"
+    ? "模型 "+MODEL_PICKS.length+" 个 / 组 "+GROUP_PICKS.length+" 个"
     : "";
 }
 function ensureModelNames(){
   if(modelNamesState !== "idle") return;
   modelNamesState = "loading";
-  loadModelNames().then(ok=>{ modelNamesState = ok ? "done" : "idle"; refreshDatalists(); },
-                        ()=>{ modelNamesState = "idle"; });
+  loadModelNames().then(ok=>{
+    modelNamesState = ok ? "done" : "idle";
+    refreshDatalists();
+    // The catalog is fetched lazily, so the picker may already be open: re-render
+    // it as soon as the model list arrives, otherwise the first open would only
+    // show the group candidates.
+    const pm=document.getElementById("pickModal");
+    if(pm&&pm.classList&&pm.classList.contains("show")) renderPickList();
+  },
+  ()=>{ modelNamesState = "idle"; });
 }
 
 // ---- edit modal ----
@@ -703,16 +790,37 @@ function openModal(g){
   document.getElementById("f_enabled").checked = g?g.enabled:true;
   const mc=document.getElementById("members"); mc.innerHTML="";
   if(g&&g.members){g.members.forEach(m=>addMemberRow(m.name,m.enabled));}
-  else addMemberRow("",true);
+  renumberRows();
   ensureModelNames();
   refreshDatalists();
   document.getElementById("modal").className="modal-bg show";
   document.getElementById("f_name").focus();
 }
 function closeModal(){document.getElementById("modal").className="modal-bg";}
+// Recompute the 1..n index column and the disabled state of the ↑/↓ buttons.
+function renumberRows(){
+  const rows=[...document.querySelectorAll("#members .mrow")];
+  rows.forEach((r,i)=>{
+    const idx=r.querySelector(".idx"); if(idx) idx.textContent=String(i+1);
+    const up=r.querySelector(".up"); const down=r.querySelector(".down");
+    if(up) up.disabled=(i===0);
+    if(down) down.disabled=(i===rows.length-1);
+  });
+}
+// Swap a row with its neighbour and renumber. delta is -1 (up) or +1 (down).
+function moveRow(row, delta){
+  const mc=document.getElementById("members");
+  const rows=[...mc.children].filter(el=>el.classList&&el.classList.contains("mrow"));
+  const i=rows.indexOf(row); const j=i+delta;
+  if(i<0||j<0||j>=rows.length) return;
+  if(delta<0) mc.insertBefore(row, rows[j]); else mc.insertBefore(rows[j], row);
+  renumberRows();
+}
 function addMemberRow(name, enabled){
   const mc=document.getElementById("members");
   const r=document.createElement("div"); r.className="mrow";
+  // The name lives on the row (data-name); save reads it from here.
+  r.dataset.name=String(name==null?"":name);
   // Drag handle. Order matters: a fallback group tries members in declaration
   // order, and it sets the round-robin starting point.
   const handle=document.createElement("span");
@@ -722,22 +830,25 @@ function addMemberRow(name, enabled){
     if(e.dataTransfer){ e.dataTransfer.effectAllowed="move"; try{e.dataTransfer.setData("text/plain","");}catch(_){} }
   };
   handle.ondragend=()=>{ r.classList.remove("dragging"); dragRow=null; };
-  // The type badge is read-only: it follows the name as it is typed.
+  const idx=document.createElement("span"); idx.className="idx";
+  // The type badge is read-only: it follows the name.
   const kind=document.createElement("span"); kind.className="m-kind";
-  const inp=document.createElement("input"); inp.type="text"; inp.className="m-name"; inp.value=name||"";
-  // One unified datalist: model names and group call names all live in dl-members.
-  // Typing a name that is not in the list still works.
-  inp.setAttribute("list","dl-members");
-  inp.placeholder="下拉选模型或组，或手填名字";
+  const nm=document.createElement("span"); nm.className="m-name mono";
   const sync=()=>{
-    const isGroup = memberTypeOf(inp.value)==="group";
+    const v=String(r.dataset.name||"");
+    nm.textContent=v; nm.title=v;
+    const isGroup = memberTypeOf(v)==="group";
     kind.textContent = isGroup ? "组" : "模型";
     kind.classList.toggle("group", isGroup);
   };
-  inp.oninput=sync; sync();
+  sync();
   const en=document.createElement("input"); en.type="checkbox"; en.className="m-enabled"; en.checked=enabled!==false;
-  const del=document.createElement("button"); del.className="ghost"; del.textContent="删除";
-  del.onclick=()=>r.remove();
+  const up=document.createElement("button"); up.type="button"; up.className="ghost icon up"; up.textContent="↑"; up.title="上移";
+  up.onclick=()=>moveRow(r,-1);
+  const down=document.createElement("button"); down.type="button"; down.className="ghost icon down"; down.textContent="↓"; down.title="下移";
+  down.onclick=()=>moveRow(r,1);
+  const del=document.createElement("button"); del.type="button"; del.className="ghost icon del danger-text"; del.textContent="✕"; del.title="移除";
+  del.onclick=()=>{ r.remove(); renumberRows(); };
   // Live reorder: move the dragged row as the cursor crosses another row's midpoint.
   r.ondragover=e=>{
     if(!dragRow||dragRow===r)return;
@@ -747,9 +858,110 @@ function addMemberRow(name, enabled){
     mc.insertBefore(dragRow, (e.clientY-rect.top) > rect.height/2 ? r.nextSibling : r);
   };
   r.ondrop=e=>e.preventDefault();
-  r.appendChild(handle); r.appendChild(kind); r.appendChild(inp); r.appendChild(en); r.appendChild(del);
+  r.appendChild(handle); r.appendChild(idx); r.appendChild(kind); r.appendChild(nm);
+  r.appendChild(en); r.appendChild(up); r.appendChild(down); r.appendChild(del);
   mc.appendChild(r);
+  renumberRows();
 }
+// ---- member picker modal (§2) ----
+// A read-only edit-modal list plus a separate multi-select picker. Candidates
+// are grouped by the segment before the first "/"; group candidates get their
+// own "组（嵌套）" group, and a free-typed name can be added manually.
+let pickPicked=new Set();
+let pickFold={};
+function candidateNames(){ return [...new Set([...MODEL_PICKS,...GROUP_PICKS])].filter(Boolean); }
+function pickGroupOf(name){
+  if(GROUP_PICKS.includes(name)) return "组（嵌套）";
+  const s=String(name); const i=s.indexOf("/");
+  return i>0 ? s.slice(0,i) : "其他";
+}
+function pickGroupBadge(title){
+  if(title==="其他") return "?";
+  if(title==="组（嵌套）") return "组";
+  return title.slice(0,2).toUpperCase();
+}
+function updatePickCount(){
+  const c=document.getElementById("pickCount");
+  if(c) c.textContent="已选 "+pickPicked.size+" 个";
+}
+// Keep the edit-modal rows in sync with the picked set: drop rows that were
+// unpicked, append new picks at the end (click order), then renumber.
+function syncMembersToPicks(){
+  const mc=document.getElementById("members");
+  [...mc.children].filter(el=>el.classList&&el.classList.contains("mrow")).forEach(r=>{
+    const v=String(r.dataset.name||"");
+    if(v&&!pickPicked.has(v)) r.remove();
+  });
+  const present=new Set([...mc.children].filter(el=>el.classList&&el.classList.contains("mrow")).map(r=>String(r.dataset.name||"")));
+  pickPicked.forEach(v=>{ if(!present.has(v)) addMemberRow(v,true); });
+  renumberRows();
+}
+function togglePick(name){
+  if(pickPicked.has(name)) pickPicked.delete(name); else pickPicked.add(name);
+  syncMembersToPicks();
+  renderPickList();
+}
+function renderPickList(){
+  const list=document.getElementById("pickList");
+  if(!list) return;
+  const input=document.getElementById("pickSearch");
+  const raw=String((input&&input.value)||"").trim();
+  const q=raw.toLowerCase();
+  const all=candidateNames();
+  list.innerHTML="";
+  // §2.4 manual add: free-typed name that is not a candidate and not picked.
+  if(raw&&!all.includes(raw)&&!pickPicked.has(raw)){
+    const wrap=document.createElement("div"); wrap.className="pickchips";
+    const b=document.createElement("button"); b.type="button"; b.className="pickchip manual";
+    b.dataset.name=raw; b.textContent="＋ 添加「"+raw+"」"; b.title=raw;
+    b.onclick=()=>togglePick(raw);
+    wrap.appendChild(b); list.appendChild(wrap);
+  }
+  const order=[]; const groups=new Map();
+  all.filter(n=>!q||n.toLowerCase().includes(q)).forEach(n=>{
+    const t=pickGroupOf(n);
+    if(!groups.has(t)){ groups.set(t,[]); order.push(t); }
+    groups.get(t).push(n);
+  });
+  order.forEach(title=>{
+    const sec=document.createElement("div"); sec.className="pgroup"+(pickFold[title]?" folded":"");
+    const head=document.createElement("div"); head.className="pghead";
+    const badge=document.createElement("span"); badge.className="pgbadge"; badge.textContent=pickGroupBadge(title);
+    const nm=document.createElement("span"); nm.className="pgname"; nm.textContent=title;
+    const cnt=document.createElement("span"); cnt.className="pgcount"; cnt.textContent="("+groups.get(title).length+")";
+    const fold=document.createElement("button"); fold.type="button"; fold.className="pgfold ghost"; fold.textContent=pickFold[title]?"▼":"▲"; fold.title="折叠/展开";
+    fold.onclick=e=>{ if(e&&e.stopPropagation)e.stopPropagation(); pickFold[title]=!pickFold[title]; renderPickList(); };
+    head.onclick=()=>{ pickFold[title]=!pickFold[title]; renderPickList(); };
+    head.appendChild(badge); head.appendChild(nm); head.appendChild(cnt); head.appendChild(fold);
+    const chips=document.createElement("div"); chips.className="pickchips";
+    groups.get(title).forEach(name=>{
+      const b=document.createElement("button"); b.type="button";
+      b.className="pickchip"+(pickPicked.has(name)?" on":"");
+      b.dataset.name=name;
+      b.textContent=(pickPicked.has(name)?"✓ ":"")+name;
+      b.title=name;
+      b.onclick=()=>togglePick(name);
+      chips.appendChild(b);
+    });
+    sec.appendChild(head); sec.appendChild(chips);
+    list.appendChild(sec);
+  });
+  updatePickCount();
+}
+function openPicker(){
+  pickPicked=new Set();
+  [...document.getElementById("members").children]
+    .filter(el=>el.classList&&el.classList.contains("mrow"))
+    .forEach(r=>{ const v=String(r.dataset.name||"").trim(); if(v) pickPicked.add(v); });
+  const s=document.getElementById("pickSearch"); if(s) s.value="";
+  pickFold={};
+  renderPickList();
+  ensureModelNames();
+  document.getElementById("pickModal").className="modal-bg show";
+  const ps=document.getElementById("pickSearch"); if(ps&&ps.focus) ps.focus();
+}
+function closePicker(){ const m=document.getElementById("pickModal"); if(m) m.className="modal-bg"; }
+
 function editGroup(g){openModal(g);}
 document.getElementById("newGroup").onclick=()=>openModal(null);
 document.getElementById("emptyNew").onclick=()=>openModal(null);
@@ -760,21 +972,29 @@ document.getElementById("modal").addEventListener("click",e=>{
 });
 document.addEventListener("keydown",e=>{
   if(e.key==="Escape"){
+    const pm=document.getElementById("pickModal");
+    if(pm&&pm.classList.contains("show")){ closePicker(); return; }
     const m=document.getElementById("modal");
     if(m.classList.contains("show")) closeModal();
   }
 });
-document.getElementById("addMember").onclick=()=>addMemberRow("",true);
+document.getElementById("addMember").onclick=openPicker;
+document.getElementById("pickDone").onclick=()=>closePicker();
+document.getElementById("pickClose").onclick=()=>closePicker();
+document.getElementById("pickSearch").oninput=renderPickList;
+document.getElementById("pickModal").onclick=e=>{
+  if(e.target&&e.target.id==="pickModal") closePicker();
+};
 document.getElementById("save").onclick=async()=>{
   const saveBtn=document.getElementById("save");
   const name=document.getElementById("f_name").value.trim();
   if(!name){toast("name 不能为空",true);return;}
   const aliases=document.getElementById("f_aliases").value.split(",").map(s=>s.trim()).filter(Boolean);
   const members=[];
-  // Read by class, not child index: the drag handle sits first in the row, so
-  // positional access would silently read the wrong elements.
+  // Read the name from the row's data-name (the row is [drag][idx][kind][name]…),
+  // never by child index: the columns before the name are not inputs.
   document.querySelectorAll("#members .mrow").forEach(r=>{
-    const val=(r.querySelector(".m-name").value||"").trim();
+    const val=String(r.dataset.name||"").trim();
     if(!val)return;
     const en=r.querySelector(".m-enabled").checked;
     members.push(memberPayload(val,en));

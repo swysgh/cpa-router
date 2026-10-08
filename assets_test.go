@@ -186,30 +186,37 @@ func TestPanelContrastMeetsWCAGAA(t *testing.T) {
 }
 
 // Regression: member names were free-text only, so every model name had to be
-// typed from memory. The unified picker offers model names and group call names
-// in a single datalist, and infers the member type from the name instead of
-// asking the user to choose model/group up front.
+// typed from memory. The edit modal now renders a read-only ordered list and a
+// separate picker modal (grouped, searchable chips) adds members; the type is
+// still inferred from the name instead of asking the user to choose up front.
 func TestPanelMemberNamePickers(t *testing.T) {
 	html := string(panelHTML())
-	if !strings.Contains(html, `<datalist id="dl-members">`) {
-		t.Error(`panel.html must declare the unified <datalist id="dl-members">`)
+	for _, want := range []string{
+		`id="addMember"`,
+		`id="pickModal"`,
+		`id="pickSearch"`,
+		`id="pickList"`,
+		"pickchip",
+		"pgbadge",
+		"pgname",
+		"pgcount",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("panel.html must render the member picker contract: missing %q", want)
+		}
+	}
+	if strings.Contains(html, "dl-members") {
+		t.Error("panel.html still references the retired dl-members datalist")
 	}
 	for _, stale := range []string{"dl-models", "dl-groups"} {
 		if strings.Contains(html, stale) {
 			t.Errorf("panel.html still declares the split picker %q", stale)
 		}
 	}
-	if strings.Contains(html, "m-type") {
-		t.Error("panel.html still renders the model/group type dropdown")
-	}
-	if !strings.Contains(html, `setAttribute("list","dl-members")`) {
-		t.Error("the member name input must be bound to the unified datalist")
-	}
-	if !strings.Contains(html, "memberTypeOf(") {
-		t.Error("panel.html must infer a member's type from its name")
-	}
-	if !strings.Contains(html, "memberPayload(") {
-		t.Error("panel.html must build the member body from the inferred type")
+	for _, fn := range []string{"memberTypeOf(", "memberPayload(", "collectGroupPicks("} {
+		if !strings.Contains(html, fn) {
+			t.Errorf("panel.html must keep %s", fn)
+		}
 	}
 	if !strings.Contains(html, `api("/model-prices/runtime-models","GET")`) {
 		t.Error("panel.html must load model names from the host runtime catalog")
@@ -218,7 +225,7 @@ func TestPanelMemberNamePickers(t *testing.T) {
 		t.Error("panel.html must fall back to the config when the catalog is unavailable")
 	}
 	if !strings.Contains(html, "refreshDatalists()") {
-		t.Error("panel.html must refresh the datalist after loading")
+		t.Error("panel.html must refresh the picker after loading")
 	}
 }
 
@@ -254,10 +261,9 @@ func TestPanelMemberRowsAreDraggable(t *testing.T) {
 	if !strings.Contains(html, "mc.insertBefore(dragRow") {
 		t.Error("dragging must actually reorder the member rows")
 	}
-	// The handle sits first in the row, so positional reads would pick it up
-	// instead of the fields.
-	if !strings.Contains(html, `r.querySelector(".m-name")`) {
-		t.Error("saving must read member fields by class, not by child index")
+	// The name lives on the row's data-name, not in a positional child slot.
+	if !strings.Contains(html, "r.dataset.name") {
+		t.Error("saving must read member names from the row, not by child index")
 	}
 	if strings.Contains(html, "r.children[0].value") || strings.Contains(html, "r.children[1].value") {
 		t.Error("member saving still uses fragile child indices")
