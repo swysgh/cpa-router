@@ -164,7 +164,11 @@ func (p *plugin) reloadGroups() {
 		p.mu.Unlock()
 		return
 	}
-	groups, _, err := parseGroups(f)
+	f, notes := normalizeGroupRefs(f, p.cfg.NamePrefix)
+	if len(notes) > 0 {
+		p.log.info("组成员引用已归一化", map[string]any{"notes": notes})
+	}
+	groups, _, err := parseGroups(f, p.cfg.NamePrefix)
 	if err == nil {
 		err = validateModelMembers(groups, p.cfg.NamePrefix)
 	}
@@ -268,7 +272,7 @@ func (p *plugin) registrationJSON() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "cpa-router",
-			Version:          "0.1.0",
+			Version:          "0.2.0",
 			Author:           "swysgh",
 			GitHubRepository: "https://github.com/swysgh/cpa-router",
 			Logo:             "",

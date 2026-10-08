@@ -186,19 +186,30 @@ func TestPanelContrastMeetsWCAGAA(t *testing.T) {
 }
 
 // Regression: member names were free-text only, so every model name had to be
-// typed from memory. They must be pickable from a datalist of known names.
+// typed from memory. The unified picker offers model names and group call names
+// in a single datalist, and infers the member type from the name instead of
+// asking the user to choose model/group up front.
 func TestPanelMemberNamePickers(t *testing.T) {
 	html := string(panelHTML())
-	for _, id := range []string{`<datalist id="dl-models">`, `<datalist id="dl-groups">`} {
-		if !strings.Contains(html, id) {
-			t.Errorf("panel.html must declare %s", id)
+	if !strings.Contains(html, `<datalist id="dl-members">`) {
+		t.Error(`panel.html must declare the unified <datalist id="dl-members">`)
+	}
+	for _, stale := range []string{"dl-models", "dl-groups"} {
+		if strings.Contains(html, stale) {
+			t.Errorf("panel.html still declares the split picker %q", stale)
 		}
 	}
-	if !strings.Contains(html, `inp.setAttribute("list", memberListId(sel.value))`) {
-		t.Error("the member name input must be bound to a datalist")
+	if strings.Contains(html, "m-type") {
+		t.Error("panel.html still renders the model/group type dropdown")
 	}
-	if !strings.Contains(html, `return type==="group" ? "dl-groups" : "dl-models"`) {
-		t.Error("memberListId must map the member type to the matching datalist")
+	if !strings.Contains(html, `setAttribute("list","dl-members")`) {
+		t.Error("the member name input must be bound to the unified datalist")
+	}
+	if !strings.Contains(html, "memberTypeOf(") {
+		t.Error("panel.html must infer a member's type from its name")
+	}
+	if !strings.Contains(html, "memberPayload(") {
+		t.Error("panel.html must build the member body from the inferred type")
 	}
 	if !strings.Contains(html, `api("/model-prices/runtime-models","GET")`) {
 		t.Error("panel.html must load model names from the host runtime catalog")
@@ -207,7 +218,26 @@ func TestPanelMemberNamePickers(t *testing.T) {
 		t.Error("panel.html must fall back to the config when the catalog is unavailable")
 	}
 	if !strings.Contains(html, "refreshDatalists()") {
-		t.Error("panel.html must refresh the datalists after loading")
+		t.Error("panel.html must refresh the datalist after loading")
+	}
+}
+
+// The unified picker must be able to emit either body shape: a name that matches
+// a group candidate (call name, prefixed alias or internal name) becomes
+// {group:...}; anything else becomes {model:...}.
+func TestPanelHasUnifiedMemberPicker(t *testing.T) {
+	html := string(panelHTML())
+	if !strings.Contains(html, "memberPayload(") {
+		t.Fatal("panel.html must build member bodies through memberPayload()")
+	}
+	if !strings.Contains(html, "{group:name,enabled:enabled}") {
+		t.Error("memberPayload must emit {group:...} for group names")
+	}
+	if !strings.Contains(html, "{model:name,enabled:enabled}") {
+		t.Error("memberPayload must emit {model:...} for model names")
+	}
+	if !strings.Contains(html, "collectGroupPicks(") {
+		t.Error("panel.html must collect group call names / aliases / internal names")
 	}
 }
 

@@ -144,6 +144,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 	}
 
 	groups := p.allGroupsSnapshot()
+	gstats := p.rt.snapshotGroupStats() // key = 组内部名 g.Name
 	groupView := make([]map[string]any, 0, len(groups))
 	for _, g := range groups {
 		members := make([]map[string]any, 0, len(g.Members))
@@ -158,6 +159,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 			}
 			members = append(members, entry)
 		}
+		gs := gstats[g.Name]
 		groupView = append(groupView, map[string]any{
 			"name":        g.Name,
 			"call_name":   p.cfg.NamePrefix + g.Name,
@@ -166,6 +168,9 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 			"description": g.Description,
 			"aliases":     g.Aliases,
 			"members":     members,
+			"group_total": gs.Total,
+			"group_ok":    gs.OK,
+			"group_fail":  gs.Fail,
 		})
 	}
 
@@ -201,7 +206,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 
 	body := map[string]any{
 		"version": 1,
-		"plugin":  map[string]any{"version": "0.1.0", "name": "cpa-router"},
+		"plugin":  map[string]any{"version": "0.2.0", "name": "cpa-router"},
 		"config": map[string]any{
 			"state_file":         cfg.StateFile,
 			"name_prefix":        cfg.NamePrefix,
@@ -572,7 +577,11 @@ func (p *plugin) currentGroupFile() groupFile {
 
 // applyGroups validates, persists, and swaps the in-memory groups atomically.
 func (p *plugin) applyGroups(f groupFile) error {
-	groups, _, err := parseGroups(f)
+	f, notes := normalizeGroupRefs(f, p.cfg.NamePrefix)
+	if len(notes) > 0 {
+		p.log.info("组成员引用已归一化", map[string]any{"notes": notes})
+	}
+	groups, _, err := parseGroups(f, p.cfg.NamePrefix)
 	if err != nil {
 		return err
 	}

@@ -230,3 +230,130 @@ func TestNamePrefixAliasIndex(t *testing.T) {
 		t.Errorf("bare group name should not be indexed with prefix")
 	}
 }
+
+// §2: normalizeGroupRefs rewrites group references into the canonical internal
+// form so a member picked from a unified list (model name or group call name)
+// is handled as a group on the server too.
+func TestNormalizeGroupRefs(t *testing.T) {
+	cases := []struct {
+		name      string
+		prefix    string
+		file      groupFile
+		wantErr   string // substring parseGroups must report; "" => success
+		wantModel string // expected container member model when success
+		wantGroup string // expected container member group when success
+		wantNotes int
+	}{
+		{
+			name:   "group member call name rewritten to internal name",
+			prefix: "g/",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Group: "g/a", Enabled: true}}},
+			}},
+			wantGroup: "a",
+			wantNotes: 1,
+		},
+		{
+			name:   "model member call name becomes group reference",
+			prefix: "g/",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Model: "g/a", Enabled: true}}},
+			}},
+			wantGroup: "a",
+			wantNotes: 1,
+		},
+		{
+			name:   "bare group name with empty prefix becomes group reference",
+			prefix: "",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Model: "a", Enabled: true}}},
+			}},
+			wantGroup: "a",
+			wantNotes: 1,
+		},
+		{
+			name:   "unknown prefixed group still errors",
+			prefix: "g/",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Group: "g/nope", Enabled: true}}},
+			}},
+			wantErr: "g/nope",
+		},
+		{
+			name:   "ordinary model stays a model",
+			prefix: "g/",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Model: "ink/glm-5.3", Enabled: true}}},
+			}},
+			wantModel: "ink/glm-5.3",
+			wantNotes: 0,
+		},
+		{
+			name:   "bare alias with prefix is not normalized (parseGroups errors)",
+			prefix: "g/",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Aliases: []string{"al"}, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Group: "al", Enabled: true}}},
+			}},
+			wantErr:   "al",
+			wantNotes: 0,
+		},
+		{
+			// With an empty prefix a bare alias IS a call name, so it must be
+			// rewritten — the panel picks group names out of the runtime model
+			// catalog, which lists aliases too.
+			name:   "bare alias with empty prefix is a call name and is normalized",
+			prefix: "",
+			file: groupFile{Version: 1, Groups: []rawGroup{
+				{Name: "a", Enabled: true, Aliases: []string{"al"}, Members: []rawMember{{Model: "m1", Enabled: true}}},
+				{Name: "b", Enabled: true, Members: []rawMember{{Group: "al", Enabled: true}}},
+			}},
+			wantGroup: "a",
+			wantNotes: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			nf, notes := normalizeGroupRefs(tc.file, tc.prefix)
+			if len(notes) != tc.wantNotes {
+				t.Fatalf("notes = %v, want %d note(s)", notes, tc.wantNotes)
+			}
+			groups, _, err := parseGroups(nf, tc.prefix)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseGroups error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGroups: %v", err)
+			}
+			var container *group
+			for i := range groups {
+				if groups[i].Name == "b" {
+					container = &groups[i]
+				}
+			}
+			if container == nil || len(container.Members) != 1 {
+				t.Fatalf("groups = %+v", groups)
+			}
+			m := container.Members[0]
+			if tc.wantGroup != "" && (m.IsModel || m.Group != tc.wantGroup) {
+				t.Fatalf("member = %+v, want group %q", m, tc.wantGroup)
+			}
+			if tc.wantModel != "" && (!m.IsModel || m.Model != tc.wantModel) {
+				t.Fatalf("member = %+v, want model %q", m, tc.wantModel)
+			}
+			// After normalization a model member that names a group call name
+			// must no longer trip the defensive validator.
+			if err := validateModelMembers(groups, tc.prefix); err != nil {
+				t.Fatalf("validateModelMembers: %v", err)
+			}
+		})
+	}
+}

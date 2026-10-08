@@ -325,3 +325,37 @@ func TestManagementPostKeepsOtherGroupDisabledMembers(t *testing.T) {
 	}
 	t.Fatal("group a not found")
 }
+
+// §1: GET /state must expose the per-group request counters so the panel no
+// longer shows a hardcoded 0. Keys are the internal group name; missing groups
+// fall back to the zero value.
+func TestManagementStateGroupStats(t *testing.T) {
+	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
+		{Name: "g1", Strategy: "fallback", Enabled: true, Members: []rawMember{{Model: "m1"}}},
+	}}, defaultConfig())
+
+	p.rt.recordGroupAttempt("g1")
+	p.rt.recordGroupAttempt("g1")
+	p.rt.recordGroupSuccess("g1")
+	p.rt.recordGroupFail("g1")
+
+	raw, err := mgmtRaw(t, p, "GET", "/plugins/cpa-router/state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeMgmtJSON(t, raw)
+	groups, _ := m["groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %v", groups)
+	}
+	g, _ := groups[0].(map[string]any)
+	if got := g["group_total"]; got != float64(2) {
+		t.Errorf("group_total = %v, want 2", got)
+	}
+	if got := g["group_ok"]; got != float64(1) {
+		t.Errorf("group_ok = %v, want 1", got)
+	}
+	if got := g["group_fail"]; got != float64(1) {
+		t.Errorf("group_fail = %v, want 1", got)
+	}
+}

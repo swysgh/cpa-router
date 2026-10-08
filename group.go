@@ -119,7 +119,16 @@ type groupFile struct {
 // parseGroups validates a groupFile and returns the validated slice plus a
 // call-name -> group-name index. It performs name/alias uniqueness, member
 // validation, reference existence, and cycle detection.
-func parseGroups(f groupFile) ([]group, map[string]string, error) {
+//
+// An optional prefix (the configured name_prefix) is only used to phrase the
+// "referenced group does not exist" error, so the message can show both legal
+// ways to reference a group. It is variadic to keep the many existing callers
+// unchanged.
+func parseGroups(f groupFile, prefix ...string) ([]group, map[string]string, error) {
+	pfx := ""
+	if len(prefix) > 0 {
+		pfx = prefix[0]
+	}
 	if f.Version != 1 {
 		return nil, nil, fmt.Errorf("组配置错误: version 必须为 1，实际 %d", f.Version)
 	}
@@ -213,7 +222,7 @@ func parseGroups(f groupFile) ([]group, map[string]string, error) {
 			}
 			if strings.TrimSpace(m.Group) != "" {
 				if _, ok := byName[m.Group]; !ok {
-					return nil, nil, fmt.Errorf("组配置错误: 组 %s 引用了不存在的组 %s", name, m.Group)
+					return nil, nil, fmt.Errorf("组配置错误: 组 %s 引用了不存在的组 %s（可写内部组名，或写调用名 %s<组名>）", name, m.Group, pfx)
 				}
 			}
 		}
@@ -315,6 +324,90 @@ func detectCycle(byName map[string]rawGroup) string {
 		}
 	}
 	return ""
+}
+
+// normalizeGroupRefs rewrites member references into the canonical internal form:
+//   - a model member whose name is a group call name (prefix+name / prefix+alias)
+//     becomes a group reference to that group;
+//   - a group member written as a call name is rewritten to the internal name.
+//
+// It returns the rewritten file plus one human-readable note per rewrite.
+func normalizeGroupRefs(f groupFile, prefix string) (groupFile, []string) {
+	byName := make(map[string]string, len(f.Groups))
+	byAlias := make(map[string]string)
+	for _, g := range f.Groups {
+		name := strings.TrimSpace(g.Name)
+		if name == "" {
+			continue
+		}
+		byName[name] = name
+		for _, a := range g.Aliases {
+			ca := strings.TrimSpace(a)
+			if ca == "" {
+				continue
+			}
+			byAlias[ca] = name
+		}
+	}
+	lookup := func(n string) (string, bool) {
+		if internal, ok := byName[n]; ok {
+			return internal, true
+		}
+		if internal, ok := byAlias[n]; ok {
+			return internal, true
+		}
+		return "", false
+	}
+	// resolveCallName reports the internal group name when n is a call name.
+	// A call name is prefix+internal; with an empty prefix a bare group name (or
+	// alias) is itself a call name.
+	resolveCallName := func(n string) (string, bool) {
+		if prefix == "" {
+			return lookup(n)
+		}
+		if !strings.HasPrefix(n, prefix) {
+			return "", false
+		}
+		return lookup(strings.TrimPrefix(n, prefix))
+	}
+
+	var notes []string
+	for gi := range f.Groups {
+		for mi := range f.Groups[gi].Members {
+			m := &f.Groups[gi].Members[mi]
+			hasModel := strings.TrimSpace(m.Model) != ""
+			hasGroup := strings.TrimSpace(m.Group) != ""
+			// Leave malformed members (both or neither) to parseGroups so its
+			// dedicated errors are preserved.
+			if hasModel == hasGroup {
+				continue
+			}
+			if hasModel {
+				n := strings.TrimSpace(m.Model)
+				if internal, ok := resolveCallName(n); ok {
+					notes = append(notes, fmt.Sprintf("成员模型 %q 是组调用名，已按组引用处理", n))
+					m.Model = ""
+					m.Group = internal
+				}
+				continue
+			}
+			n := strings.TrimSpace(m.Group)
+			if _, ok := byName[n]; ok {
+				continue // already an internal group name
+			}
+			// Rewrite a call name to the internal name. With an empty prefix a
+			// bare group name or alias is itself a call name, so it is
+			// rewritten here too; with a prefix, only prefix+name / prefix+alias
+			// are call names, and a bare alias stays as-is (parseGroups reports
+			// it as missing).
+			if internal, ok := resolveCallName(n); ok {
+				notes = append(notes, fmt.Sprintf("组成员 %q 已归一化为 %q", n, internal))
+				m.Group = internal
+			}
+			// Otherwise keep the raw value: parseGroups reports it as missing.
+		}
+	}
+	return f, notes
 }
 
 // buildGroupNameIndex builds the call-name -> group-name index given a prefix.
