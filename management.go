@@ -206,7 +206,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 
 	body := map[string]any{
 		"version": 1,
-		"plugin":  map[string]any{"version": "0.2.0", "name": "cpa-router"},
+		"plugin":  map[string]any{"version": "0.2.1", "name": "cpa-router"},
 		"config": map[string]any{
 			"state_file":         cfg.StateFile,
 			"name_prefix":        cfg.NamePrefix,

@@ -108,18 +108,20 @@
   .cstats { margin: .4rem 0 .2rem; font-size: .85rem; }
   .cdesc { margin: .35rem 0 .1rem; }
 
-  /* member rows: one shared column template, so columns line up across rows */
-  .mhead, .prow { display: grid; grid-template-columns: var(--cpa-cols); gap: 0 .6rem; align-items: center; }
-  .mhead { color: var(--cpa-muted-fg); font-size: .72rem; padding: .2rem 0; }
+  /* member rows: the name gets its own line so long model ids stay readable;
+     the meta line below carries status / counters / latency. */
   .prow {
-    font-size: .85rem; padding: .3rem 0; border-top: 1px dashed var(--cpa-border);
+    padding: .35rem 0; border-top: 1px dashed var(--cpa-border);
     transition: background-color .12s;
   }
+  .prow .p1 { display: flex; align-items: center; gap: .45rem; min-width: 0; }
+  .prow .pname { flex: 1 1 auto; min-width: 0; font-size: .82rem; }
+  .prow .p2 {
+    display: flex; flex-wrap: wrap; gap: .05rem .8rem; margin-top: .1rem;
+    font-size: .78rem; color: var(--cpa-muted-fg);
+  }
   .prow:hover { background: var(--cpa-muted); }
-  /* The card already prints a 总/成/败 column header, so the cells carry bare
-     numbers; keep them on one line so every row has the same height. */
-  .prow .pstat { white-space: nowrap; }
-  .prow .pstatus { white-space: nowrap; }
+  .prow .pstat, .prow .pstatus { white-space: nowrap; }
   .tbadge {
     display: inline-block; text-align: center; font-size: .72rem;
     padding: .05rem .3rem; border-radius: 999px;
@@ -237,7 +239,7 @@
   <header id="topbar">
     <div class="brand">
       <h1>模型路由</h1>
-      <span class="chip" id="verChip">v0.2.0</span>
+      <span class="chip" id="verChip">v0.2.1</span>
       <span class="sub" id="counts"></span>
     </div>
     <div class="top-actions">
@@ -463,7 +465,7 @@ async function render(){
     document.getElementById("ovMembers").textContent=String(memberSum);
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.2.0");
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.2.1");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -512,7 +514,6 @@ function groupCard(g, models){
   let html="";
   if(g.description)html+='<div class="cdesc sub">'+esc(g.description)+'</div>';
   html+='<div class="mgrid">';
-  html+='<div class="mhead"><span>类型</span><span>名字</span><span>状态</span><span>总/成/败</span><span>平均延迟</span></div>';
   (g.members||[]).forEach(m=>{ html+=memberRowHTML(m, models); });
   html+='</div>';
   c.innerHTML=html;
@@ -554,10 +555,14 @@ function memberRowHTML(m, models){
   // A group member has no per-model stats; show the referenced group's own
   // request counters instead of an empty placeholder.
   const sub=(isGroup&&GROUP_MAP&&GROUP_MAP[m.name])?GROUP_MAP[m.name]:null;
-  const stats=ms?('<span class="pstat">'+n(ms.total)+' / '+n(ms.ok)+' / '+n(ms.fail)+'</span>')
-    :(sub?('<span class="pstat">'+n(sub.group_total)+' / '+n(sub.group_ok)+' / '+n(sub.group_fail)+'</span>'):'<span class="sub">—</span>');
-  const latency=(ms&&Number(n(ms.avg_latency_ms))>0)?('<span>'+n(ms.avg_latency_ms)+'ms</span>'):'<span class="sub">—</span>';
-  return '<div class="prow">'+badge+'<span class="pname mono" title="'+esc(m.name)+'">'+esc(m.name)+'</span><span class="pstatus">'+status+'</span>'+stats+latency+'</div>';
+  const nums=ms?[n(ms.total),n(ms.ok),n(ms.fail)]
+    :(sub?[n(sub.group_total),n(sub.group_ok),n(sub.group_fail)]:null);
+  const stats=nums?('<span class="pstat">总'+nums[0]+' / 成'+nums[1]+' / 败'+nums[2]+'</span>')
+    :'<span class="sub">暂无调用</span>';
+  const latency=(ms&&Number(n(ms.avg_latency_ms))>0)?('<span>'+n(ms.avg_latency_ms)+'ms</span>'):'';
+  return '<div class="prow"><div class="p1">'+badge
+    +'<span class="pname mono" title="'+esc(m.name)+'">'+esc(m.name)+'</span></div>'
+    +'<div class="p2"><span class="pstatus">'+status+'</span>'+stats+latency+'</div></div>';
 }
 // Cooling members, counted recursively: a member that is itself a group
 // contributes its own cooling members (visited set + depth cap guard against
