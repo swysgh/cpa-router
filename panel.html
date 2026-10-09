@@ -306,7 +306,7 @@
   <header id="topbar">
     <div class="brand">
       <h1>模型路由</h1>
-      <span class="chip" id="verChip">v0.3.0</span>
+      <span class="chip" id="verChip">v0.3.1</span>
       <span class="sub" id="counts"></span>
     </div>
     <div class="top-actions">
@@ -471,6 +471,13 @@ function api(path, method, body){
   if(key)opts.headers["Authorization"]="Bearer "+key;
   return fetch(MGMT_BASE+path,{...opts, headers:opts.headers});
 }
+// The host only rebuilds its model list on startup / config change, so every
+// write that adds, removes or renames a group must poke it. This has to go
+// through api(): a bare fetch carries no Authorization header, so it 401s and
+// the new group stays callable while missing from /v1/models.
+async function notifyHostRefresh(){
+  try{await api("/plugins/cpa-router/config","PATCH",{revision:String(Date.now())});}catch(e){}
+}
 function banner(msg, isErr){
   const b=document.getElementById("banner");
   b.textContent=msg; b.className="banner show "+(isErr?"err":"ok");
@@ -550,7 +557,7 @@ async function render(){
     document.getElementById("ovMembers").textContent=String(memberSum);
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.3.0");
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.3.1");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -614,7 +621,7 @@ function groupCard(g, models){
     if(!confirm("删除组 "+g.name+"?"))return;
     const r=await api("/plugins/cpa-router/groups?name="+encodeURIComponent(g.name),"DELETE");
     const j=await r.json();
-    if(j.ok){toast("已删除组 "+g.name,false);render();}
+    if(j.ok){toast("已删除组 "+g.name,false);await notifyHostRefresh();render();}
     else toast(j.error||"删除失败",true);
   };
   row.appendChild(del);
@@ -1009,7 +1016,7 @@ document.getElementById("save").onclick=async()=>{
       closeModal();
       toast("已保存，正在刷新模型列表…",false);
       // Notify the host to re-register models (best-effort).
-      try{await fetch("/v0/management/plugins/cpa-router/config",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({revision:String(Date.now())})});}catch(e){}
+      await notifyHostRefresh();
       render();
     } else toast(j.error||"保存失败",true);
   }catch(e){ toast("保存失败: "+(e.message||e),true); }

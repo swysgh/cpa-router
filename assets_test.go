@@ -30,6 +30,25 @@ func TestPanelUsesManagementPrefix(t *testing.T) {
 	}
 }
 
+// Regression: the post-save "notify the host to re-register models" call used a
+// bare fetch() to /v0/management, which carries no Authorization header -> 401,
+// swallowed by an empty catch. The host only calls model.register on startup /
+// config change, so a group saved from the panel stayed callable (model.route
+// reads groups.yaml live) while never appearing in /v1/models. Every call to a
+// host management route must go through api().
+func TestPanelRefreshesHostModelsThroughAuthenticatedAPI(t *testing.T) {
+	html := string(panelHTML())
+	if strings.Contains(html, `fetch("/v0/management`) {
+		t.Error("panel.html calls a host management route with a bare fetch; use api() so the Authorization header is sent")
+	}
+	if !strings.Contains(html, `api("/plugins/cpa-router/config","PATCH"`) {
+		t.Error(`saving/deleting a group must re-register models via api("/plugins/cpa-router/config","PATCH",...)`)
+	}
+	if strings.Count(html, "notifyHostRefresh()") < 2 {
+		t.Error("notifyHostRefresh() must be called after both save and delete")
+	}
+}
+
 // Regression: the panel runs inside an iframe, and CSS custom properties do not
 // cross that boundary. Using var(--foreground) with no fallback made `color`
 // inherit the UA default (white under a dark OS preference) while the background
