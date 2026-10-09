@@ -261,6 +261,17 @@
     background: var(--cpa-accent); color: var(--cpa-accent-fg); border-color: transparent;
   }
   .pickchip.manual { border-style: dashed; }
+  /* Members the host no longer serves are listed in their own section: they are
+     not candidates, so they would otherwise be invisible here. Danger colour so
+     the section reads as "these need attention", not as another model group. */
+  .pgroup.stale { border-color: rgba(248,113,113,.45); }
+  .pgroup.stale .pghead { border-bottom-color: rgba(248,113,113,.3); }
+  .pgroup.stale .pgbadge, .pgroup.stale .pgname { color: var(--cpa-danger); }
+  .pgroup.stale .pgbadge { border-color: rgba(248,113,113,.5); }
+  .pickchip.stale { border-color: rgba(248,113,113,.5); color: var(--cpa-danger); }
+  .pickchip.stale.on { background: rgba(248,113,113,.2); border-color: rgba(248,113,113,.65); }
+  .pgroup.stale .pickchips { padding-top: .35rem; }
+  .picknote { padding: 0 .55rem .5rem; font-size: .74rem; color: var(--cpa-muted-fg); }
   .pickfoot { display: flex; align-items: center; gap: .5rem; margin-top: .7rem; }
   .pickcount { color: var(--cpa-muted-fg); font-size: .82rem; }
 
@@ -557,7 +568,7 @@ async function render(){
     document.getElementById("ovMembers").textContent=String(memberSum);
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.3.1");
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.4.0");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -876,7 +887,18 @@ function addMemberRow(name, enabled){
 // own "组（嵌套）" group, and a free-typed name can be added manually.
 let pickPicked=new Set();
 let pickFold={};
+const PICK_MISSING_TITLE="已失效（不在模型列表）";
 function candidateNames(){ return [...new Set([...MODEL_PICKS,...GROUP_PICKS])].filter(Boolean); }
+// Picked names the catalog does not know: the host stopped serving them (channel
+// removed, upstream retired the id) or the name was a typo. They are not
+// candidates, so the picker rendered no chip for them and they could not be
+// removed from here at all. Empty until the catalog has actually arrived —
+// otherwise every member looks dead while the list is still loading.
+function pickMissing(){
+  if(modelNamesState!=="done"||!MODEL_PICKS.length) return [];
+  const known=new Set(candidateNames());
+  return [...pickPicked].filter(v=>v&&!known.has(v)).sort();
+}
 function pickGroupOf(name){
   if(GROUP_PICKS.includes(name)) return "组（嵌套）";
   const s=String(name); const i=s.indexOf("/");
@@ -889,7 +911,9 @@ function pickGroupBadge(title){
 }
 function updatePickCount(){
   const c=document.getElementById("pickCount");
-  if(c) c.textContent="已选 "+pickPicked.size+" 个";
+  if(!c) return;
+  const miss=pickMissing().length;
+  c.textContent="已选 "+pickPicked.size+" 个"+(miss?"（其中失效 "+miss+"）":"");
 }
 // Keep the edit-modal rows in sync with the picked set: drop rows that were
 // unpicked, append new picks at the end (click order), then renumber.
@@ -908,6 +932,37 @@ function togglePick(name){
   syncMembersToPicks();
   renderPickList();
 }
+// One collapsible candidate section. `stale` is the "no longer served" list: its
+// chips are picked (a click removes them), so they keep the picked styling.
+function appendPickGroup(list, title, names, stale){
+  const sec=document.createElement("div"); sec.className="pgroup"+(pickFold[title]?" folded":"")+(stale?" stale":"");
+  const head=document.createElement("div"); head.className="pghead";
+  const badge=document.createElement("span"); badge.className="pgbadge";
+  badge.textContent=stale?"失效":pickGroupBadge(title);
+  const nm=document.createElement("span"); nm.className="pgname"; nm.textContent=title;
+  const cnt=document.createElement("span"); cnt.className="pgcount"; cnt.textContent="("+names.length+")";
+  const fold=document.createElement("button"); fold.type="button"; fold.className="pgfold ghost"; fold.textContent=pickFold[title]?"▼":"▲"; fold.title="折叠/展开";
+  fold.onclick=e=>{ if(e&&e.stopPropagation)e.stopPropagation(); pickFold[title]=!pickFold[title]; renderPickList(); };
+  head.onclick=()=>{ pickFold[title]=!pickFold[title]; renderPickList(); };
+  head.appendChild(badge); head.appendChild(nm); head.appendChild(cnt); head.appendChild(fold);
+  const chips=document.createElement("div"); chips.className="pickchips";
+  names.forEach(name=>{
+    const b=document.createElement("button"); b.type="button";
+    b.className="pickchip"+(pickPicked.has(name)?" on":"")+(stale?" stale":"");
+    b.dataset.name=name;
+    b.textContent=(pickPicked.has(name)?"✓ ":"")+name;
+    b.title=name;
+    b.onclick=()=>togglePick(name);
+    chips.appendChild(b);
+  });
+  sec.appendChild(head); sec.appendChild(chips);
+  if(stale){
+    const note=document.createElement("div"); note.className="picknote";
+    note.textContent="点一下取消选中即可移除，关闭本窗口后点外层「保存」生效。";
+    sec.appendChild(note);
+  }
+  list.appendChild(sec);
+}
 function renderPickList(){
   const list=document.getElementById("pickList");
   if(!list) return;
@@ -924,35 +979,16 @@ function renderPickList(){
     b.onclick=()=>togglePick(raw);
     wrap.appendChild(b); list.appendChild(wrap);
   }
+  // Dead members go first: they are the ones that need a decision.
+  const missing=pickMissing().filter(v=>!q||v.toLowerCase().includes(q));
+  if(missing.length) appendPickGroup(list, PICK_MISSING_TITLE, missing, true);
   const order=[]; const groups=new Map();
-  all.filter(n=>!q||n.toLowerCase().includes(q)).forEach(n=>{
-    const t=pickGroupOf(n);
+  all.filter(v=>!q||v.toLowerCase().includes(q)).forEach(v=>{
+    const t=pickGroupOf(v);
     if(!groups.has(t)){ groups.set(t,[]); order.push(t); }
-    groups.get(t).push(n);
+    groups.get(t).push(v);
   });
-  order.forEach(title=>{
-    const sec=document.createElement("div"); sec.className="pgroup"+(pickFold[title]?" folded":"");
-    const head=document.createElement("div"); head.className="pghead";
-    const badge=document.createElement("span"); badge.className="pgbadge"; badge.textContent=pickGroupBadge(title);
-    const nm=document.createElement("span"); nm.className="pgname"; nm.textContent=title;
-    const cnt=document.createElement("span"); cnt.className="pgcount"; cnt.textContent="("+groups.get(title).length+")";
-    const fold=document.createElement("button"); fold.type="button"; fold.className="pgfold ghost"; fold.textContent=pickFold[title]?"▼":"▲"; fold.title="折叠/展开";
-    fold.onclick=e=>{ if(e&&e.stopPropagation)e.stopPropagation(); pickFold[title]=!pickFold[title]; renderPickList(); };
-    head.onclick=()=>{ pickFold[title]=!pickFold[title]; renderPickList(); };
-    head.appendChild(badge); head.appendChild(nm); head.appendChild(cnt); head.appendChild(fold);
-    const chips=document.createElement("div"); chips.className="pickchips";
-    groups.get(title).forEach(name=>{
-      const b=document.createElement("button"); b.type="button";
-      b.className="pickchip"+(pickPicked.has(name)?" on":"");
-      b.dataset.name=name;
-      b.textContent=(pickPicked.has(name)?"✓ ":"")+name;
-      b.title=name;
-      b.onclick=()=>togglePick(name);
-      chips.appendChild(b);
-    });
-    sec.appendChild(head); sec.appendChild(chips);
-    list.appendChild(sec);
-  });
+  order.forEach(title=>appendPickGroup(list, title, groups.get(title), false));
   updatePickCount();
 }
 function openPicker(){

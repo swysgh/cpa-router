@@ -302,3 +302,29 @@ func TestPanelRendersAttemptTrace(t *testing.T) {
 		t.Error("panel.html still dumps raw JSON for test results")
 	}
 }
+
+// Regression: a member whose model the host no longer serves (its channel was
+// removed, or the upstream retired the id) is not a picker candidate, so the
+// picker rendered no chip for it — the dead member was invisible there and could
+// not be removed from the picker at all. Picked-but-unknown names must be listed
+// in their own section, and that section must stay empty until the catalog has
+// actually arrived (otherwise every member looks dead while the list is empty).
+func TestPanelListsMissingMembersSeparately(t *testing.T) {
+	html := string(panelHTML())
+	for _, want := range []string{
+		"function pickMissing(",
+		"PICK_MISSING_TITLE",
+		`modelNamesState!=="done"||!MODEL_PICKS.length`,
+		"appendPickGroup(list, PICK_MISSING_TITLE, missing, true)",
+		".pickchip.stale",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("panel.html must list members the catalog no longer knows: missing %q", want)
+		}
+	}
+	// Stale chips go through the same toggle as every other candidate, so a click
+	// unselects them and syncMembersToPicks drops the row.
+	if !strings.Contains(html, "b.onclick=()=>togglePick(name);") {
+		t.Error("stale chips must toggle through togglePick() so a click removes the member")
+	}
+}
