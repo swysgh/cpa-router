@@ -145,6 +145,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 
 	groups := p.allGroupsSnapshot()
 	gstats := p.rt.snapshotGroupStats() // key = 组内部名 g.Name
+	gtokens := p.rt.snapshotGroupTokens()
 	groupView := make([]map[string]any, 0, len(groups))
 	for _, g := range groups {
 		members := make([]map[string]any, 0, len(g.Members))
@@ -160,6 +161,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 			members = append(members, entry)
 		}
 		gs := gstats[g.Name]
+		gt := gtokens[g.Name]
 		groupView = append(groupView, map[string]any{
 			"name":        g.Name,
 			"call_name":   p.cfg.NamePrefix + g.Name,
@@ -171,12 +173,20 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 			"group_total": gs.Total,
 			"group_ok":    gs.OK,
 			"group_fail":  gs.Fail,
+			// Upstream-reported token usage of every request the client
+			// addressed to this group (nested groups are credited to the group
+			// that was called, so these sums never double-count).
+			"group_input_tokens":  gt.Input,
+			"group_output_tokens": gt.Output,
+			"group_total_tokens":  gt.Total,
+			"group_token_reqs":    gt.Reqs,
 		})
 	}
 
 	models := map[string]any{}
 	cooldowns := p.rt.snapshotCooldowns()
 	stats := p.rt.snapshotModels()
+	tokens := p.rt.snapshotTokens()
 	now := p.rt.now()
 	for name, st := range stats {
 		cd := cooldowns[name]
@@ -203,21 +213,37 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 			"avg_latency_ms": avgLatency,
 		}
 	}
+	// Members that only ever reported usage (no cooldown/attempt bookkeeping yet)
+	// still deserve an entry so the panel can show their token counters.
+	for name, tk := range tokens {
+		entry, ok := models[name].(map[string]any)
+		if !ok {
+			entry = map[string]any{}
+			models[name] = entry
+		}
+		entry["input_tokens"] = tk.Input
+		entry["output_tokens"] = tk.Output
+		entry["total_tokens"] = tk.Total
+		entry["token_reqs"] = tk.Reqs
+		entry["tokens_last_at"] = tk.LastUsed.Unix()
+	}
 
 	body := map[string]any{
 		"version": 1,
-		"plugin":  map[string]any{"version": "0.4.0", "name": "cpa-router"},
+		"plugin":  map[string]any{"version": "0.5.0", "name": "cpa-router"},
 		"config": map[string]any{
-			"state_file":         cfg.StateFile,
-			"name_prefix":        cfg.NamePrefix,
-			"reload_interval":    cfg.ReloadInterval,
-			"max_attempts":       cfg.MaxAttempts,
-			"attempt_timeout":    cfg.AttemptTimeout,
-			"total_timeout":      cfg.TotalTimeout,
-			"all_cooling_policy": cfg.AllCoolingPolicy,
-			"max_wait":           cfg.MaxWait,
-			"log_level":          cfg.LogLevel,
-			"cooldown":           cfg.Cooldown,
+			"state_file":           cfg.StateFile,
+			"stats_file":           cfg.StatsFile,
+			"stats_flush_interval": cfg.StatsFlushInterval,
+			"name_prefix":          cfg.NamePrefix,
+			"reload_interval":      cfg.ReloadInterval,
+			"max_attempts":         cfg.MaxAttempts,
+			"attempt_timeout":      cfg.AttemptTimeout,
+			"total_timeout":        cfg.TotalTimeout,
+			"all_cooling_policy":   cfg.AllCoolingPolicy,
+			"max_wait":             cfg.MaxWait,
+			"log_level":            cfg.LogLevel,
+			"cooldown":             cfg.Cooldown,
 		},
 		"state_file": map[string]any{
 			"path":   absPath,

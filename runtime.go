@@ -38,11 +38,17 @@ type groupStat struct {
 // runtimeState holds all mutable per-request runtime state. It is protected by
 // a mutex and safe for concurrent use (§12).
 type runtimeState struct {
-	mu         sync.Mutex
-	cooldowns  map[string]*cooldownState
-	stats      map[string]*modelStat
-	groupStats map[string]*groupStat
-	pointers   map[string]int
+	mu          sync.Mutex
+	cooldowns   map[string]*cooldownState
+	stats       map[string]*modelStat
+	groupStats  map[string]*groupStat
+	tokens      map[string]*tokenStat
+	groupTokens map[string]*tokenStat
+	pointers    map[string]int
+
+	// tokenUpdates counts recorded usage reports; it lets the periodic writer
+	// skip a flush when nothing changed.
+	tokenUpdates int64
 
 	nowFunc func() time.Time
 	rng     *rand.Rand
@@ -50,12 +56,14 @@ type runtimeState struct {
 
 func newRuntimeState() *runtimeState {
 	return &runtimeState{
-		cooldowns:  make(map[string]*cooldownState),
-		stats:      make(map[string]*modelStat),
-		groupStats: make(map[string]*groupStat),
-		pointers:   make(map[string]int),
-		nowFunc:    time.Now,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		cooldowns:   make(map[string]*cooldownState),
+		stats:       make(map[string]*modelStat),
+		groupStats:  make(map[string]*groupStat),
+		tokens:      make(map[string]*tokenStat),
+		groupTokens: make(map[string]*tokenStat),
+		pointers:    make(map[string]int),
+		nowFunc:     time.Now,
+		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -244,6 +252,71 @@ func (r *runtimeState) pointerAdvance(name string) int {
 	return p
 }
 
+// recordTokens adds one response's token usage to both the called group and the
+// member that served it.
+func (r *runtimeState) recordTokens(groupName, member string, u tokenUsage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.clock()
+	r.tokenStat(r.groupTokens, groupName).add(u, now)
+	r.tokenStat(r.tokens, member).add(u, now)
+	r.tokenUpdates++
+}
+
+// tokenStat returns (creating on first use) the counter for a name in a map.
+func (r *runtimeState) tokenStat(m map[string]*tokenStat, name string) *tokenStat {
+	st, ok := m[name]
+	if !ok {
+		st = &tokenStat{}
+		m[name] = st
+	}
+	return st
+}
+
+// tokenUpdateCount reports how many usage reports have been recorded, so the
+// periodic writer can tell whether there is anything new to persist.
+func (r *runtimeState) tokenUpdateCount() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.tokenUpdates
+}
+
+// snapshotTokens returns a copy of the per-member token counters.
+func (r *runtimeState) snapshotTokens() map[string]tokenStat {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]tokenStat, len(r.tokens))
+	for k, v := range r.tokens {
+		out[k] = *v
+	}
+	return out
+}
+
+// snapshotGroupTokens returns a copy of the per-group token counters.
+func (r *runtimeState) snapshotGroupTokens() map[string]tokenStat {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]tokenStat, len(r.groupTokens))
+	for k, v := range r.groupTokens {
+		out[k] = *v
+	}
+	return out
+}
+
+// restoreTokens seeds the counters from a persisted stats file.
+func (r *runtimeState) restoreTokens(models, groups map[string]tokenStat) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range models {
+		st := v
+		r.tokens[k] = &st
+	}
+	for k, v := range groups {
+		st := v
+		r.groupTokens[k] = &st
+	}
+}
+
 // earliestCooling returns the model with the soonest cooldown expiry among the
 // given models, or "" when none are cooling.
 func (r *runtimeState) earliestCooling(models []string) string {
@@ -282,9 +355,11 @@ func (r *runtimeState) reset(name, what string) int {
 	}
 	if what == "stats" || what == "all" {
 		if name == "" {
-			cleared += len(r.stats) + len(r.groupStats)
+			cleared += len(r.stats) + len(r.groupStats) + len(r.tokens) + len(r.groupTokens)
 			r.stats = make(map[string]*modelStat)
 			r.groupStats = make(map[string]*groupStat)
+			r.tokens = make(map[string]*tokenStat)
+			r.groupTokens = make(map[string]*tokenStat)
 		} else {
 			if _, ok := r.stats[name]; ok {
 				delete(r.stats, name)
@@ -292,6 +367,13 @@ func (r *runtimeState) reset(name, what string) int {
 			}
 			if _, ok := r.groupStats[name]; ok {
 				delete(r.groupStats, name)
+				cleared++
+			}
+			// Token counters are keyed by group name and by member model name;
+			// a reset by group name clears the group's own counters. Member
+			// counters stay, because one member can serve several groups.
+			if _, ok := r.groupTokens[name]; ok {
+				delete(r.groupTokens, name)
 				cleared++
 			}
 		}

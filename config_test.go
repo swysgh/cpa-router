@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -76,4 +77,33 @@ func containsSubstr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// Regression: validateConfig used to take the config by value, so every parsed
+// duration it computed was written to a copy and thrown away — a custom
+// duration in config.yaml was silently replaced by the default. Only the string
+// fields (and the slices decoded straight from YAML) took effect.
+func TestDecodeConfigHonorsCustomDurations(t *testing.T) {
+	cfg, err := decodeConfig([]byte("attempt_timeout: \"7s\"\ntotal_timeout: \"90s\"\nreload_interval: \"9s\"\n" +
+		"cooldown:\n  base: \"11s\"\n  max: \"12s\"\n  transient_base: \"13s\"\n  transient_max: \"14s\"\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range []struct {
+		field string
+		got   time.Duration
+		want  time.Duration
+	}{
+		{"attempt_timeout", cfg.AttemptTimeoutDur, 7 * time.Second},
+		{"total_timeout", cfg.TotalTimeoutDur, 90 * time.Second},
+		{"reload_interval", cfg.ReloadIntervalDur, 9 * time.Second},
+		{"cooldown.base", cfg.CooldownBase, 11 * time.Second},
+		{"cooldown.max", cfg.CooldownMax, 12 * time.Second},
+		{"cooldown.transient_base", cfg.CooldownTransientBase, 13 * time.Second},
+		{"cooldown.transient_max", cfg.CooldownTransientMax, 14 * time.Second},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.field, c.got, c.want)
+		}
+	}
 }

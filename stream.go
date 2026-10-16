@@ -251,6 +251,20 @@ func (p *plugin) forwardStream(g *group, attempts []string, hitIndex int, firstS
 // next member). In every other case the plugin stream is closed and the result
 // is terminal.
 func (p *plugin) relayMemberStream(g *group, member, hostStreamID, pluginStreamID string) (emitted bool, failedEarly bool) {
+	// Usage is collected across the whole member stream and recorded once when
+	// it ends: providers that split one request's counters over several frames
+	// (claude: input tokens in message_start, output tokens in message_delta)
+	// would otherwise be counted twice or lose a field.
+	var (
+		usage     tokenUsage
+		haveUsage bool
+	)
+	defer func() {
+		if haveUsage {
+			p.rt.recordTokens(g.Name, member, usage)
+		}
+	}()
+
 	for {
 		rawChunk, readErr := p.host.Call(pluginabi.MethodHostModelStreamRead, pluginapi.HostModelStreamReadRequest{StreamID: hostStreamID})
 		if readErr != nil {
@@ -264,6 +278,10 @@ func (p *plugin) relayMemberStream(g *group, member, hostStreamID, pluginStreamI
 			return p.finishMemberStream(pluginStreamID, emitted, chunk.Error)
 		}
 		if len(chunk.Payload) > 0 {
+			if u, ok := extractUsage(chunk.Payload); ok {
+				usage = mergeTokenUsage(usage, u)
+				haveUsage = true
+			}
 			if !emitted {
 				emitted = true
 				p.rt.recordSuccess(member, 0)

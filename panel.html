@@ -334,6 +334,7 @@
     <div class="ovs-item"><div class="ovs-num" id="ovMembers">0</div><div class="ovs-lab">成员</div></div>
     <div class="ovs-item"><div class="ovs-num" id="ovCool">0</div><div class="ovs-lab">冷却中成员</div></div>
     <div class="ovs-item"><div class="ovs-num" id="ovReqs">0</div><div class="ovs-lab">累计请求</div></div>
+    <div class="ovs-item"><div class="ovs-num" id="ovTokens">0</div><div class="ovs-lab">累计 tokens</div></div>
   </section>
 
   <div class="toolbar">
@@ -561,14 +562,15 @@ async function render(){
     GROUP_PICKS=collectGroupPicks(gs, NAME_PREFIX);
     GROUP_MAP={}; gs.forEach(g=>{GROUP_MAP[g.name]=g;});
     // Overview strip: everything the panel computes itself.
-    let memberSum=0, coolSum=0, reqSum=0;
-    gs.forEach(g=>{ memberSum+=(g.members||[]).length; reqSum+=Number(n(g.group_total))||0; });
+    let memberSum=0, coolSum=0, reqSum=0, tokSum=0;
+    gs.forEach(g=>{ memberSum+=(g.members||[]).length; reqSum+=Number(n(g.group_total))||0; tokSum+=Number(n(g.group_total_tokens))||0; });
     gs.forEach(g=>{ coolSum+=coolingCount(g, models, GROUP_MAP); });
     document.getElementById("ovGroups").textContent=String(gs.length);
     document.getElementById("ovMembers").textContent=String(memberSum);
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.4.0");
+    document.getElementById("ovTokens").textContent=fmtTokens(tokSum);
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.5.0");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -611,7 +613,9 @@ function groupCard(g, models){
   head.appendChild(enTxt);
   const stats=document.createElement("div"); stats.className="cstats sub";
   stats.textContent="组请求 "+n(g.group_total)+" · 成功 "+n(g.group_ok)+" · 失败 "+n(g.group_fail)
-    +"　成员 "+members.length+"（冷却 "+cool+"）";
+    +"　成员 "+members.length+"（冷却 "+cool+"）"
+    +"　tokens "+fmtTokens(n(g.group_total_tokens))
+    +"（入 "+fmtTokens(n(g.group_input_tokens))+" / 出 "+fmtTokens(n(g.group_output_tokens))+"）";
   // The member list is a CSS grid so every row's columns line up; names are the
   // only user data here, and they go through esc().
   let html="";
@@ -627,6 +631,7 @@ function groupCard(g, models){
   row.appendChild(btn("编辑",()=>editGroup(g),"ghost"));
   row.appendChild(btn("测试",()=>{document.getElementById("testGroup").value=g.call_name;document.getElementById("testPrompt").scrollIntoView({behavior:"smooth",block:"center"});},"ghost"));
   row.appendChild(btn("重置冷却",()=>doReset(g.name,"cooldown"),"ghost"));
+  row.appendChild(btn("重置统计",()=>doReset(g.name,"stats"),"ghost"));
   const del=document.createElement("button"); del.className="danger"; del.textContent="删除";
   del.onclick=async()=>{
     if(!confirm("删除组 "+g.name+"?"))return;
@@ -662,10 +667,13 @@ function memberRowHTML(m, models){
     :(sub?[n(sub.group_total),n(sub.group_ok),n(sub.group_fail)]:null);
   const stats=nums?('<span class="pstat">总'+nums[0]+' / 成'+nums[1]+' / 败'+nums[2]+'</span>')
     :'<span class="sub">暂无调用</span>';
+  const tok=(ms&&Number(n(ms.total_tokens))>0)
+    ?('<span class="pstat" title="输入 '+n(ms.input_tokens)+' / 输出 '+n(ms.output_tokens)+'">tok '+fmtTokens(n(ms.total_tokens))+'</span>')
+    :'';
   const latency=(ms&&Number(n(ms.avg_latency_ms))>0)?('<span>'+n(ms.avg_latency_ms)+'ms</span>'):'';
   return '<div class="prow"><div class="p1">'+badge
     +'<span class="pname mono" title="'+esc(m.name)+'">'+esc(m.name)+'</span></div>'
-    +'<div class="p2"><span class="pstatus">'+status+'</span>'+stats+latency+'</div></div>';
+    +'<div class="p2"><span class="pstatus">'+status+'</span>'+stats+tok+latency+'</div></div>';
 }
 // Cooling members, counted recursively: a member that is itself a group
 // contributes its own cooling members (visited set + depth cap guard against
@@ -692,6 +700,14 @@ function coolingCount(g, models, gmap){
 }
 function btn(label,fn,cls){const b=document.createElement("button");b.textContent=label;if(cls)b.className=cls;b.onclick=(typeof fn==="function")?fn:()=>{};return b;}
 function n(v){return v==null?0:v;}
+// Token totals run into the millions; the exact value stays available via the
+// title attribute on the member row.
+function fmtTokens(v){
+  const x=Number(n(v))||0;
+  if(x<1000)return String(x);
+  if(x<1000000)return (x/1000).toFixed(x<10000?1:0)+"k";
+  return (x/1000000).toFixed(2)+"M";
+}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));}
 
 // ---- filtering ----

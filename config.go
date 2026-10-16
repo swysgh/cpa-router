@@ -13,6 +13,7 @@ import (
 // stored as strings so we can produce field-named validation errors (§4).
 type config struct {
 	StateFile        string `yaml:"state_file"`
+	StatsFile        string `yaml:"stats_file"`
 	NamePrefix       string `yaml:"name_prefix"`
 	ReloadInterval   string `yaml:"reload_interval"`
 	MaxAttempts      int    `yaml:"max_attempts"`
@@ -22,6 +23,10 @@ type config struct {
 	MaxWait          string `yaml:"max_wait"`
 	LogLevel         string `yaml:"log_level"`
 
+	// StatsFlushInterval is how often the token counters are written to
+	// stats_file (they are also written once on load/interval ticks).
+	StatsFlushInterval string `yaml:"stats_flush_interval"`
+
 	Cooldown cooldownConfig `yaml:"cooldown"`
 
 	// Parsed durations (filled by decodeConfig / validateConfig).
@@ -29,6 +34,7 @@ type config struct {
 	AttemptTimeoutDur     time.Duration `yaml:"-"`
 	TotalTimeoutDur       time.Duration `yaml:"-"`
 	MaxWaitDur            time.Duration `yaml:"-"`
+	StatsFlushIntervalDur time.Duration `yaml:"-"`
 	CooldownBase          time.Duration `yaml:"-"`
 	CooldownMax           time.Duration `yaml:"-"`
 	CooldownTransientBase time.Duration `yaml:"-"`
@@ -52,15 +58,17 @@ type cooldownConfig struct {
 // defaultConfig returns the documented default configuration.
 func defaultConfig() config {
 	cfg := config{
-		StateFile:        "plugins/cpa-router/groups.yaml",
-		NamePrefix:       "",
-		ReloadInterval:   "2s",
-		MaxAttempts:      6,
-		AttemptTimeout:   "120s",
-		TotalTimeout:     "600s",
-		AllCoolingPolicy: "wait",
-		MaxWait:          "15s",
-		LogLevel:         "info",
+		StateFile:          "plugins/cpa-router/groups.yaml",
+		StatsFile:          "plugins/cpa-router/stats.json",
+		NamePrefix:         "",
+		ReloadInterval:     "2s",
+		MaxAttempts:        6,
+		AttemptTimeout:     "120s",
+		TotalTimeout:       "600s",
+		AllCoolingPolicy:   "wait",
+		MaxWait:            "15s",
+		LogLevel:           "info",
+		StatsFlushInterval: "30s",
 		Cooldown: cooldownConfig{
 			Disable:           false,
 			Statuses:          []int{429},
@@ -82,6 +90,7 @@ func defaultConfig() config {
 	cfg.AttemptTimeoutDur = 120 * time.Second
 	cfg.TotalTimeoutDur = 600 * time.Second
 	cfg.MaxWaitDur = 15 * time.Second
+	cfg.StatsFlushIntervalDur = 30 * time.Second
 	cfg.CooldownBase = 30 * time.Second
 	cfg.CooldownMax = 30 * time.Minute
 	cfg.CooldownTransientBase = 15 * time.Second
@@ -105,7 +114,7 @@ func decodeConfig(raw []byte) (config, error) {
 	cfg.AllCoolingPolicy = strings.TrimSpace(cfg.AllCoolingPolicy)
 	cfg.LogLevel = strings.TrimSpace(cfg.LogLevel)
 
-	if err := validateConfig(cfg); err != nil {
+	if err := validateConfig(&cfg); err != nil {
 		return config{}, err
 	}
 	return cfg, nil
@@ -124,8 +133,14 @@ func parseDurationField(field, s string, allowZero bool) (time.Duration, error) 
 	return d, nil
 }
 
-// validateConfig enforces the rules documented in §4.
-func validateConfig(cfg config) error {
+// validateConfig enforces the rules documented in §4 and fills the parsed
+// duration fields.
+//
+// It takes a pointer on purpose: it is the only place the string duration
+// fields are turned into time.Duration, so a value receiver would silently
+// discard every parsed duration and leave the defaults in place (custom
+// attempt_timeout / cooldown.base in config.yaml had no effect).
+func validateConfig(cfg *config) error {
 	// Parse and validate duration fields with field-named errors.
 	// reload_interval may be 0 (disabled) or positive.
 	ri, err := parseDurationField("reload_interval", cfg.ReloadInterval, true)
@@ -144,6 +159,10 @@ func validateConfig(cfg config) error {
 		return err
 	}
 	mw, err := parseDurationField("max_wait", cfg.MaxWait, false)
+	if err != nil {
+		return err
+	}
+	sfi, err := parseDurationField("stats_flush_interval", cfg.StatsFlushInterval, false)
 	if err != nil {
 		return err
 	}
@@ -211,6 +230,7 @@ func validateConfig(cfg config) error {
 	cfg.AttemptTimeoutDur = at
 	cfg.TotalTimeoutDur = tt
 	cfg.MaxWaitDur = mw
+	cfg.StatsFlushIntervalDur = sfi
 	cfg.CooldownBase = cb
 	cfg.CooldownMax = cm
 	cfg.CooldownTransientBase = ctb

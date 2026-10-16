@@ -41,6 +41,16 @@ type plugin struct {
 	rt        *runtimeState
 	log       *logger
 
+	// Token counters are persisted through their own store; statsMu guards the
+	// flush bookkeeping (not the counters themselves, which live in rt).
+	statsStore         *statsStore
+	statsPath          string
+	statsMu            sync.Mutex
+	statsFlusherOnce   sync.Once
+	statsFlusherStop   chan struct{}
+	statsLastFlush     time.Time
+	statsFlushedWrites int64
+
 	lastReload time.Time
 }
 
@@ -113,6 +123,8 @@ func (p *plugin) configure(raw []byte) error {
 		return err
 	}
 
+	reloadStats := false
+
 	p.mu.Lock()
 	p.cfg = cfg
 	p.log.level = cfg.LogLevel
@@ -121,8 +133,26 @@ func (p *plugin) configure(raw []byte) error {
 	} else {
 		p.store = nil
 	}
+	// Token counters persist across restarts. Reload only when the target file
+	// changes (first configure, or a config edit pointing somewhere else);
+	// re-reading on every reconfigure would discard the counts recorded since
+	// the last flush.
+	if cfg.StatsFile != p.statsPath {
+		p.statsPath = cfg.StatsFile
+		if cfg.StatsFile != "" {
+			p.statsStore = newStatsStore(cfg.StatsFile)
+		} else {
+			p.statsStore = nil
+		}
+		reloadStats = true
+	}
 	// Preserve existing runtime (cooldown/stats) across reconfigure.
 	p.mu.Unlock()
+
+	if reloadStats {
+		p.loadTokenStats()
+	}
+	p.startStatsFlusher()
 
 	// Load state file (best-effort; keep empty groups on failure).
 	p.reloadGroups()
@@ -272,12 +302,14 @@ func (p *plugin) registrationJSON() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "cpa-router",
-			Version:          "0.4.0",
+			Version:          "0.5.0",
 			Author:           "swysgh",
 			GitHubRepository: "https://github.com/swysgh/cpa-router",
 			Logo:             "",
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "state_file", Type: pluginapi.ConfigFieldTypeString, Description: "组配置状态文件路径（相对进程工作目录）"},
+				{Name: "stats_file", Type: pluginapi.ConfigFieldTypeString, Description: "token 统计文件路径（空 = 只统计在内存，重启清零）"},
+				{Name: "stats_flush_interval", Type: pluginapi.ConfigFieldTypeString, Description: "token 统计落盘间隔，如 30s"},
 				{Name: "name_prefix", Type: pluginapi.ConfigFieldTypeString, Description: "组调用名前缀，默认空"},
 				{Name: "reload_interval", Type: pluginapi.ConfigFieldTypeString, Description: "状态文件热加载检查间隔，如 2s"},
 				{Name: "max_attempts", Type: pluginapi.ConfigFieldTypeNumber, Description: "单请求最多尝试的成员数，0 表示不限制"},

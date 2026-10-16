@@ -352,6 +352,10 @@ func (p *plugin) executeTraced(raw []byte, trace *[]attemptTrace) ([]byte, error
 		elapsed := p.rt.now().Sub(attemptStart)
 		p.rt.recordSuccess(member, elapsed)
 		p.rt.recordGroupSuccess(g.Name)
+		// The member's own usage report is the only token accounting available
+		// for a group request: the host skips usage publishing for nested
+		// executions, so nothing downstream ever sees these tokens.
+		p.recordTokens(g.Name, member, resp.Body)
 		recordAttemptTrace(trace, attemptTrace{
 			Member: member, Status: http.StatusOK,
 			LatencyMS: int(elapsed.Milliseconds()),

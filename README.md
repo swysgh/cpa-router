@@ -48,6 +48,8 @@
          enabled: true          # 宿主字段
          priority: 20           # 宿主字段：必须高于 qoder(5)
          state_file: "plugins/cpa-router/groups.yaml"   # 相对进程工作目录(/CLIProxyAPI)
+         stats_file: "plugins/cpa-router/stats.json"    # token 统计文件；空 = 只统计在内存（重启清零）
+         stats_flush_interval: "30s"  # token 统计落盘间隔（定时异步写）
          name_prefix: ""        # 组调用名前缀，例如 "r/" 时调用名是 "r/<组名>"
          reload_interval: "2s"  # 状态文件 mtime 检查间隔；<=0 表示不热加载
          max_attempts: 6        # 单请求最多尝试的成员数（展开后的模型个数），0=不限
@@ -155,6 +157,22 @@ curl -X POST .../v1/chat/completions \
   单独列在最上面的「已失效（不在模型列表）」分区**（红色、标 ✓），点一下即取消选中、
   回到外层点「保存」就会把该成员从组里删掉。模型清单尚未加载完时不显示该分区，避免把正常
   成员误判成失效。
+
+## token 统计
+
+组的成员调用是宿主的**嵌套执行**，宿主会跳过所有用量上报点（外层打 `markNestedExecution`、内层
+`InternalSource` 不建 reporter），所以 CPAMP 里看不到组流量，token 数只能由本插件从成员响应里自己取：
+
+- 非流式取 `host.model.execute` 响应的 `usage`；流式逐帧扫 `host.model.stream.read` 的 chunk，
+  整个成员流结束后记一次（claude 把 input/output 分在不同帧，按字段合并）。
+- 支持 openai（`prompt_tokens`/`completion_tokens`/`total_tokens`）、claude（`input_tokens`/`output_tokens`，
+  含流式 `message.usage`）、gemini（`usageMetadata.*`）。**只累加上游报的数，不做任何估算**；上游不报就不记。
+- 归属：只记到客户端实际调用的那个组，嵌套组不另记 —— 所有组相加不会重复计数。
+- 计数在内存，按 `stats_flush_interval` 异步落盘到 `stats_file`（原子替换），重启后自动恢复；
+  `stats_file: ""` 则只统计在内存。冷却/请求数仍是纯内存（重启清零）。
+- 面板：概览「累计 tokens」、组卡片 `tokens 入/出/合计`、成员行 `tok 合计`（悬停看输入/输出）、
+  组卡片「重置统计」按钮；`GET /state` 暴露 `group_total_tokens` / `group_input_tokens` /
+  `group_output_tokens` / `group_token_reqs` 与 `models[].total_tokens` 等字段。
 
 ## 已知限制
 

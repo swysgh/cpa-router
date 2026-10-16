@@ -328,3 +328,24 @@ func TestPanelListsMissingMembersSeparately(t *testing.T) {
 		t.Error("stale chips must toggle through togglePick() so a click removes the member")
 	}
 }
+
+// The panel is the only place the token counters are read, so it must actually
+// render them: a group's cumulative tokens, the overview total, the per-member
+// counters, and a way to zero a group's statistics.
+func TestPanelRendersTokenCounters(t *testing.T) {
+	html := string(panelHTML())
+	for _, want := range []string{
+		`id="ovTokens"`,            // overview tile
+		"fmtTokens(tokSum)",        // overview total is summed from the groups
+		"n(g.group_total_tokens)",  // group card total
+		"n(g.group_input_tokens)",  // group card input
+		"n(g.group_output_tokens)", // group card output
+		"n(ms.total_tokens)",       // member row total
+		"function fmtTokens(",      // compact formatter for large counts
+		`doReset(g.name,"stats")`,  // reset statistics button
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("panel.html must render token counters: missing %q", want)
+		}
+	}
+}

@@ -69,7 +69,7 @@ cpa-router/
 2. 不新增任何第三方依赖，除了 `gopkg.in/yaml.v3`。
 3. 日志里**不得**出现密钥、token、凭证 JSON、用户请求体全文（可以记长度、模型名、状态码、耗时）。
 4. 不改动 CPA 仓库、不改 `config.yaml` 之外的宿主文件；本插件只写自己的状态文件。
-5. 不要实现需求之外的功能（不做权重、不做配额查询、不做 token 计数估算）。
+5. 不要实现需求之外的功能（不做权重、不做配额查询）。token 统计只累加上游响应里报的 `usage`，**不做任何估算**（见 §15）。
 
 ---
 
@@ -142,6 +142,8 @@ plugins:
       enabled: true          # 宿主字段
       priority: 20           # 宿主字段：必须高于 qoder(5)，保证路由插件先被询问
       state_file: "plugins/cpa-router/groups.yaml"   # 相对进程工作目录(/CLIProxyAPI)
+      stats_file: "plugins/cpa-router/stats.json"    # token 统计文件；空 = 只统计在内存（重启清零）
+      stats_flush_interval: "30s"  # token 统计落盘间隔（异步定时写，不在请求路径上）
       name_prefix: ""        # 组调用名前缀，例如 "r/" 时调用名是 "r/<组名>"
       reload_interval: "2s"  # 状态文件 mtime 检查间隔；<=0 表示不热加载
       max_attempts: 6        # 单请求最多尝试的成员数（展开后的模型个数），0=不限
@@ -165,7 +167,7 @@ plugins:
 
 校验规则（任一不满足 → 返回中文错误信封，格式 `配置错误: <字段>: <原因>`）：
 
-- 所有时长字段必须是合法 Go duration 字符串且 `> 0`（`reload_interval` 允许 `0` 表示关闭热加载）。
+- 所有时长字段必须是合法 Go duration 字符串且 `> 0`（`reload_interval` 允许 `0` 表示关闭热加载；`stats_flush_interval` 必须 `> 0`）。
 - `max_attempts >= 0`；`factor >= 1`；`0 <= jitter < 1`。
 - `all_cooling_policy` 只能是 `wait|first|error`。
 - `log_level` 只能是 `debug|info|warn|error`。
@@ -511,7 +513,7 @@ function getKey(){return sessionStorage.getItem(SS_KEY)||readPanelKey()||readUrl
 **页面功能**（够用即可，不要堆砌）：
 
 1. 顶部：插件版本、状态文件路径、生效配置摘要（折叠）、密钥状态、「刷新」按钮。
-2. 组卡片列表：组名 + 调用名、策略徽标（轮询/降级）、启用开关、成员列表（每个成员显示：类型图标、名称、是否冷却 + 剩余秒数、该模型的统计小字）、组级统计（请求/成功/失败）、按钮：`编辑`、`删除`、`重置冷却`、`测试`。
+2. 组卡片列表：组名 + 调用名、策略徽标（轮询/降级）、启用开关、成员列表（每个成员显示：类型图标、名称、是否冷却 + 剩余秒数、该模型的统计小字）、组级统计（请求/成功/失败 + token 入/出/合计）、按钮：`编辑`、`删除`、`重置冷却`、`测试`。
 3. 新建/编辑弹窗：`name`、`aliases`（逗号分隔）、`strategy`（下拉）、`description`、`enabled`、成员行（类型下拉 `模型|组` + 名称输入（用 `<datalist>` 提示：已有模型名 + 已有组名）+ 启用勾选 + 删除行）、`添加成员` 按钮。保存 → `POST /plugins/cpa-router/groups`。
 4. 测试面板：选组 + prompt 输入 + 「发送」→ `POST /plugins/cpa-router/test`，展示状态码、耗时、每次尝试的成员/状态/冷却、响应前 500 字符。
 5. 保存成功后：调用一次 `PATCH /v0/management/plugins/cpa-router/config`，body `{"revision": "<Date.now()>"}`，让宿主重新注册模型列表（失败不报错，只在提示条里说明「模型列表需重启或手动刷新才会更新」）。
@@ -577,3 +579,67 @@ nm -D bin/cpa-router.so | grep -c cliproxy       # 应 >= 4
 4. 不要给资源页 GET 加副作用；不要加载第三方脚本。
 5. 不要为了「跑通测试」而写假实现/假输出。
 6. 不要顺手重构与需求无关的部分；不要新增需求之外的配置项。
+7. token 统计不得估算、不得自己发上游请求、不得在请求路径上做同步 IO（落盘只能异步定时）；
+   拿不到 usage 就什么都不记，绝不能编一个数。
+
+---
+
+## 15. token 统计（v0.5.0 新增）
+
+### 15.1 为什么只能在插件里统计
+
+组的成员调用走 `host.model.execute(_stream)`，宿主在 `model_execution.go` 里对调用方 ctx 打
+`markNestedExecution`，而所有用量上报点都带 `!nestedTracker.hasNestedExecution()`：
+
+- 外层（客户端请求的组名）→ 跳过上报；
+- 内层（被调成员，`InternalSource: true`）→ 连 reporter 都不建。
+
+两头都不报，所以 CPAMP / `usage_events` 里**永远看不到组流量**（这是宿主有意设计，不是 bug）。
+因此 token 数只能由插件从**成员响应**里自己取。
+
+### 15.2 取数口径（只取上游报的数，绝不估算）
+
+| 来源 | 位置 |
+|---|---|
+| 非流式 | `host.model.execute` 响应的 `Body`（JSON）里的 `usage` |
+| 流式 | `host.model.stream.read` 的 chunk payload；逐帧扫，**整个成员流结束后记一次** |
+
+协议差异（客户端用什么格式调用，成员那条腿就是什么格式）：
+
+- openai：`usage.prompt_tokens` / `completion_tokens` / `total_tokens`
+- claude：`usage.input_tokens` / `output_tokens`（非流式在顶层，流式在 `message.usage`）
+- gemini：`usageMetadata.promptTokenCount` / `candidatesTokenCount` / `totalTokenCount`
+
+流式必须**按字段合并**（后一帧某字段缺失或为 0 时保留前值）：claude 把 input 放在 `message_start`、
+output 放在 `message_delta`，逐帧相加会重复计数，只取最后一帧会丢掉 input。
+
+payload 既可能是裸 JSON（宿主的模型流未加 `data: ` 前缀，前缀是宿主在转发插件 payload 时加的），
+也可能带 `data: ` 前缀；两种都要能解析，解析失败只当没看到（usage 是尽力而为的遥测，不能影响请求）。
+
+### 15.3 计数与落盘
+
+- 计数器：`runtimeState.tokens[成员模型名]` + `runtimeState.groupTokens[组内部名]`，
+  字段 `input` / `output` / `total` / `reqs`（真正报了 usage 的次数）/ `last_used_at`。
+- **归属**：只记到「客户端实际调用的那个组」，嵌套组不另记 —— 这样把所有组相加也不会重复计数。
+- 落盘：`stats_file`（默认 `plugins/cpa-router/stats.json`，独立于手写的 `groups.yaml`），
+  异步定时（`stats_flush_interval`，默认 30s）**仅在计数有变化时**写，原子替换（temp + rename，0600）。
+  启动/reconfigure 时读回；文件缺失正常、损坏只 warn 不清零。
+- `stats_file: ""` = 只统计在内存。
+- 冷却/请求数仍是纯内存（重启清零），只有 token 统计持久化。
+
+### 15.4 暴露面
+
+- `GET /state`：组对象新增 `group_input_tokens` / `group_output_tokens` / `group_total_tokens` /
+  `group_token_reqs`；`models[成员]` 新增 `input_tokens` / `output_tokens` / `total_tokens` /
+  `token_reqs` / `tokens_last_at`；`config` 新增 `stats_file` / `stats_flush_interval`。
+- `POST /reset`：`what=stats|all` 一并清 token 计数（按组名清只清该组的组级计数）。
+- 面板：概览「累计 tokens」、组卡片 `tokens 入/出/合计`、成员行 `tok 合计`（title 里给输入/输出）、
+  组卡片新增「重置统计」按钮。大数用 `fmtTokens()` 压成 `12.3k` / `1.2M`。
+
+### 15.5 验收
+
+- 单测：三种协议 + 流式 `data: ` 前缀/裸 JSON/多帧/`usage:null` 的解析；非流式与流式各一条
+  「计数落到组和成员」用例；流式重复 usage 帧**只记一次**且转发的 payload 逐字节不变；
+  落盘→重启→恢复；`stats_flush_interval` 的「有变化才写」；缺文件/坏文件不影响启动；
+  `what=stats` 只清目标组；`/state` 暴露上述字段；面板确实渲染这些字段。
+- 回归：`validateConfig` 必须用指针接收者（见 §4 校验），否则自定义时长会被静默丢弃。
