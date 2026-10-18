@@ -237,11 +237,34 @@ func TestPanelMemberNamePickers(t *testing.T) {
 			t.Errorf("panel.html must keep %s", fn)
 		}
 	}
+	if !strings.Contains(html, `api("/plugins/cpa-router/models","GET")`) {
+		t.Error("panel.html must load model names from the plugin's own catalog first")
+	}
 	if !strings.Contains(html, `api("/model-prices/runtime-models","GET")`) {
-		t.Error("panel.html must load model names from the host runtime catalog")
+		t.Error("panel.html must still read the host runtime catalog")
 	}
 	if !strings.Contains(html, `api("/config","GET")`) {
-		t.Error("panel.html must fall back to the config when the catalog is unavailable")
+		t.Error("panel.html must also read the config: it is the only source for models whose keys live in config.yaml")
+	}
+	// Regression: the /config source used to yield bare model names only. The host
+	// registers `prefix + "/" + id` and, with force-model-prefix on, registers no
+	// bare name at all -- so the picker offered names that answer 404, and every
+	// healthy prefixed member was listed as 已失效. The prefix must be expanded,
+	// and the bare id must not be offered as well: it is either dead or a
+	// duplicate chip of the same model.
+	for _, want := range []string{"addModel(ch.prefix,", "addModel(e.prefix,"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("panel.html must expand the channel prefix from /config: missing %q", want)
+		}
+	}
+	if strings.Contains(html, "picks.push(name);\n        const p = String(prefix") {
+		t.Error("panel.html must not push the bare model name for a prefixed channel")
+	}
+	// A disabled channel registers nothing, so its models are never callable.
+	for _, want := range []string{"if(disabled || !name) return;", "addModel(ch.prefix, m.alias||m.name, ch.disabled)"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("panel.html must skip disabled channels: missing %q", want)
+		}
 	}
 	if !strings.Contains(html, "refreshDatalists()") {
 		t.Error("panel.html must refresh the picker after loading")

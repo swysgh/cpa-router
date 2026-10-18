@@ -157,14 +157,17 @@ func (p *plugin) configure(raw []byte) error {
 	// Load state file (best-effort; keep empty groups on failure).
 	p.reloadGroups()
 
-	// Log effective config full text.
+	// Log effective config full text. The group count is read under the lock like
+	// every other p.groups access: a management save may be publishing a new
+	// slice on another goroutine.
 	p.mu.RLock()
 	absPath := p.statePath
 	cfgCopy := p.cfg
+	groupCount := len(p.groups)
 	p.mu.RUnlock()
 	cfgYAML, _ := yaml.Marshal(cfgCopy)
 	p.log.info("cpa-router 已加载", map[string]any{
-		"groups":     len(p.groups),
+		"groups":     groupCount,
 		"state_file": absPath,
 		"config":     string(cfgYAML),
 	})
@@ -210,6 +213,10 @@ func (p *plugin) reloadGroups() {
 		return
 	}
 	nameIdx := buildGroupNameIndex(groups, p.cfg.NamePrefix)
+	// Same ordering as a management save, so /state and the panel do not flip
+	// between file order and sorted order across a reload. Sort before the swap:
+	// readers copy p.groups under RLock only.
+	sortGroupsByName(groups)
 	p.mu.Lock()
 	p.groups = groups
 	p.nameIndex = nameIdx
@@ -289,6 +296,7 @@ type registrationCapability struct {
 	ExecutorInputFormats  []string `json:"executor_input_formats"`
 	ExecutorOutputFormats []string `json:"executor_output_formats"`
 	ManagementAPI         bool     `json:"management_api"`
+	ResponseInterceptor   bool     `json:"response_interceptor"`
 }
 
 type registration struct {
@@ -302,7 +310,7 @@ func (p *plugin) registrationJSON() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "cpa-router",
-			Version:          "0.5.0",
+			Version:          "0.7.0",
 			Author:           "swysgh",
 			GitHubRepository: "https://github.com/swysgh/cpa-router",
 			Logo:             "",
@@ -318,6 +326,7 @@ func (p *plugin) registrationJSON() registration {
 				{Name: "all_cooling_policy", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"wait", "first", "error"}, Description: "整组冷却时的策略"},
 				{Name: "max_wait", Type: pluginapi.ConfigFieldTypeString, Description: "all_cooling_policy=wait 时的最长等待"},
 				{Name: "log_level", Type: pluginapi.ConfigFieldTypeString, Description: "debug|info|warn|error"},
+				{Name: "filter_models", Type: pluginapi.ConfigFieldTypeBoolean, Description: "/v1/models 只显示启用的 cpa-router 组调用名；关闭后保留宿主全部模型"},
 			},
 		},
 		Capabilities: registrationCapability{
@@ -328,6 +337,7 @@ func (p *plugin) registrationJSON() registration {
 			ExecutorInputFormats:  []string{"openai", "openai-response", "claude", "gemini", "codex", "antigravity", "interactions"},
 			ExecutorOutputFormats: []string{"openai", "openai-response", "claude", "gemini", "codex", "antigravity", "interactions"},
 			ManagementAPI:         true,
+			ResponseInterceptor:   true,
 		},
 	}
 }
@@ -339,42 +349,75 @@ const modelProviderName = "cpa-router"
 // the process so repeated registrations do not churn the model list.
 var modelCreatedAt = time.Now().Unix()
 
+// callNameSnapshot is a lock-protected copy of the two inputs that decide the
+// public call names: the config prefix and the groups. model.register and the
+// /v1/models filter both derive their names from one of these, so the list the
+// plugin advertises and the list it keeps can never disagree.
+type callNameSnapshot struct {
+	prefix string
+	groups []group
+}
+
+func (p *plugin) callNameSnapshot() callNameSnapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	groups := make([]group, len(p.groups))
+	copy(groups, p.groups)
+	return callNameSnapshot{prefix: p.cfg.NamePrefix, groups: groups}
+}
+
+// forEachEnabledCallName visits every public call name (name_prefix + group name
+// or alias) of the enabled groups exactly once, in declaration order. Disabled
+// groups contribute nothing.
+func (s callNameSnapshot) forEachEnabledCallName(fn func(id string, g group)) {
+	seen := make(map[string]bool, 2*len(s.groups))
+	for _, g := range s.groups {
+		if !g.Enabled {
+			continue
+		}
+		for _, n := range append([]string{g.Name}, g.Aliases...) {
+			id := s.prefix + strings.TrimSpace(n)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			fn(id, g)
+		}
+	}
+}
+
+// modelInfos builds the model.register entries for the snapshot's call names.
+func (s callNameSnapshot) modelInfos() []pluginapi.ModelInfo {
+	models := make([]pluginapi.ModelInfo, 0, 2*len(s.groups))
+	s.forEachEnabledCallName(func(id string, g group) {
+		desc := g.Description
+		if desc == "" {
+			desc = fmt.Sprintf("cpa-router 组（%s，%d 个成员）", g.Strategy, len(g.Members))
+		}
+		models = append(models, pluginapi.ModelInfo{
+			ID:          id,
+			Object:      "model",
+			Created:     modelCreatedAt,
+			OwnedBy:     modelProviderName,
+			DisplayName: id,
+			Name:        id,
+			Description: desc,
+			UserDefined: true,
+		})
+	})
+	return models
+}
+
 // modelRegistrationJSON advertises the group call names (and aliases) as models.
 //
 // Without this the groups are callable but invisible: clients that list models
 // never see them, because the host only learns about plugin-provided models via
 // model.register. Disabled groups are not advertised.
 func (p *plugin) modelRegistrationJSON() pluginapi.ModelRegistrationResponse {
-	prefix := p.cfg.NamePrefix
-	seen := make(map[string]bool)
-	models := make([]pluginapi.ModelInfo, 0, 8)
-	for _, g := range p.allGroupsSnapshot() {
-		if !g.Enabled {
-			continue
-		}
-		for _, n := range append([]string{g.Name}, g.Aliases...) {
-			id := prefix + strings.TrimSpace(n)
-			if id == "" || seen[id] {
-				continue
-			}
-			seen[id] = true
-			desc := g.Description
-			if desc == "" {
-				desc = fmt.Sprintf("cpa-router 组（%s，%d 个成员）", g.Strategy, len(g.Members))
-			}
-			models = append(models, pluginapi.ModelInfo{
-				ID:          id,
-				Object:      "model",
-				Created:     modelCreatedAt,
-				OwnedBy:     modelProviderName,
-				DisplayName: id,
-				Name:        id,
-				Description: desc,
-				UserDefined: true,
-			})
-		}
+	return pluginapi.ModelRegistrationResponse{
+		Provider: modelProviderName,
+		Models:   p.callNameSnapshot().modelInfos(),
 	}
-	return pluginapi.ModelRegistrationResponse{Provider: modelProviderName, Models: models}
 }
 
 // ---- method dispatch ----
@@ -398,6 +441,8 @@ func (p *plugin) HandleMethod(method string, request []byte) ([]byte, error) {
 		return p.execute(request)
 	case pluginabi.MethodExecutorExecuteStream:
 		return p.executeStream(request)
+	case pluginabi.MethodResponseInterceptAfter:
+		return p.interceptResponse(request)
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(p.managementRegistrationJSON())
 	case pluginabi.MethodManagementHandle:

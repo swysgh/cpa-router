@@ -24,6 +24,7 @@ func (p *plugin) managementRegistrationJSON() map[string]any {
 		},
 		"routes": []map[string]any{
 			{"Method": "GET", "Path": "/plugins/cpa-router/state"},
+			{"Method": "GET", "Path": "/plugins/cpa-router/models"},
 			{"Method": "PUT", "Path": "/plugins/cpa-router/groups"},
 			{"Method": "POST", "Path": "/plugins/cpa-router/groups"},
 			{"Method": "DELETE", "Path": "/plugins/cpa-router/groups"},
@@ -91,6 +92,8 @@ func (p *plugin) handleManagement(raw []byte) (*pluginapi.ManagementResponse, er
 	switch {
 	case method == "GET" && path == "/plugins/cpa-router/state":
 		return p.handleState(req)
+	case method == "GET" && path == "/plugins/cpa-router/models":
+		return p.handleModelsList(req)
 	case method == "PUT" && path == "/plugins/cpa-router/groups":
 		return p.handleGroupsPut(req)
 	case method == "POST" && path == "/plugins/cpa-router/groups":
@@ -230,7 +233,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 
 	body := map[string]any{
 		"version": 1,
-		"plugin":  map[string]any{"version": "0.5.0", "name": "cpa-router"},
+		"plugin":  map[string]any{"version": "0.7.0", "name": "cpa-router"},
 		"config": map[string]any{
 			"state_file":           cfg.StateFile,
 			"stats_file":           cfg.StatsFile,
@@ -243,6 +246,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 			"all_cooling_policy":   cfg.AllCoolingPolicy,
 			"max_wait":             cfg.MaxWait,
 			"log_level":            cfg.LogLevel,
+			"filter_models":        cfg.FilterModels,
 			"cooldown":             cfg.Cooldown,
 		},
 		"state_file": map[string]any{
@@ -258,6 +262,163 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 }
 
 func groupsView(v []map[string]any) []map[string]any { return v }
+
+// ---- GET /models ----
+
+// handleModelsList returns every model name the host can actually serve, plus
+// this plugin's own group call names.
+//
+// Why it exists: /v1/models is trimmed to the group call names (see intercept.go),
+// so a management console asking the host for "all models" gets a list that is
+// useless for building groups. The interceptor already lets console requests
+// through, but a console cannot always reach /v1/models with a usable API key —
+// this endpoint answers the same question with the management key the panel
+// already holds.
+//
+// The host exposes no "list models" callback, so the catalog is assembled from
+// the credentials: host.auth.list gives the entries, host.auth.get gives each
+// one's JSON, and the "models" field of that JSON is what the credential can
+// serve.
+func (p *plugin) handleModelsList(req managementRequest) (*pluginapi.ManagementResponse, error) {
+	models, err := p.collectCredentialModels()
+	if err != nil {
+		p.log.warn("枚举凭证模型失败", map[string]any{"error": err.Error()})
+		return mgmtResponse(http.StatusInternalServerError, map[string]any{"ok": false, "error": "枚举凭证模型失败: " + err.Error()}), nil
+	}
+	// Group call names come from the same snapshot model.register uses, so the
+	// picker never offers a group the plugin does not advertise.
+	p.callNameSnapshot().forEachEnabledCallName(func(id string, _ group) { models[id] = true })
+
+	out := make([]string, 0, len(models))
+	for name := range models {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return mgmtResponse(http.StatusOK, map[string]any{"models": out}), nil
+}
+
+// collectCredentialModels enumerates the model names declared by every host
+// credential. Credentials that cannot be read (runtime-only entries generated
+// from config.yaml have no backing file) are skipped: they carry no model list
+// either, so skipping them loses nothing.
+func (p *plugin) collectCredentialModels() (map[string]bool, error) {
+	raw, err := p.host.Call(pluginabi.MethodHostAuthList, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var list struct {
+		Files []pluginapi.HostAuthFileEntry `json:"files"`
+	}
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("解析凭证列表失败: %w", err)
+	}
+
+	models := make(map[string]bool, 2*len(list.Files))
+	for _, entry := range list.Files {
+		index := strings.TrimSpace(entry.AuthIndex)
+		if index == "" {
+			continue
+		}
+		// A disabled credential is unregistered by the host, so none of its models
+		// is callable; listing them would only hand the picker dead candidates.
+		if entry.Disabled {
+			continue
+		}
+		rawAuth, err := p.host.Call(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: index})
+		if err != nil {
+			p.log.debug("跳过无法读取的凭证", map[string]any{"auth_index": index, "name": entry.Name, "error": err.Error()})
+			continue
+		}
+		var got pluginapi.HostAuthGetResponse
+		if err := json.Unmarshal(rawAuth, &got); err != nil {
+			p.log.debug("跳过凭证 JSON 无法解析的条目", map[string]any{"auth_index": index, "error": err.Error()})
+			continue
+		}
+		for _, name := range modelsFromCredentialJSON(got.JSON) {
+			models[name] = true
+		}
+	}
+	return models, nil
+}
+
+// modelsFromCredentialJSON pulls the model names out of one credential's JSON.
+//
+// The "models" field is either a plain string array or an array of
+// {name, alias} objects (both shapes exist in CPA config/auth files). An alias
+// is a callable name too, so it is kept alongside the upstream name.
+//
+// A credential may also carry a channel prefix (`"prefix": "anti"`). The host
+// applies it to every model it registers for that credential, and with
+// force-model-prefix on the bare id is not registered at all, so the prefix has
+// to be part of the returned name -- otherwise every candidate is a 400.
+func modelsFromCredentialJSON(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil
+	}
+	rawModels, ok := root["models"]
+	if !ok {
+		return nil
+	}
+	prefix := credentialPrefix(root)
+	var names []string
+	if err := json.Unmarshal(rawModels, &names); err == nil {
+		return applyCredentialPrefix(cleanModelNames(names), prefix)
+	}
+	var entries []struct {
+		Name  string `json:"name"`
+		Alias string `json:"alias"`
+	}
+	if err := json.Unmarshal(rawModels, &entries); err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		names = append(names, e.Name, e.Alias)
+	}
+	return applyCredentialPrefix(cleanModelNames(names), prefix)
+}
+
+// credentialPrefix reads the credential's channel prefix (the same field the host
+// feeds into applyModelPrefixes). Blank or non-string values mean "no prefix".
+func credentialPrefix(root map[string]json.RawMessage) string {
+	rawPrefix, ok := root["prefix"]
+	if !ok {
+		return ""
+	}
+	var prefix string
+	if err := json.Unmarshal(rawPrefix, &prefix); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(prefix)
+}
+
+// applyCredentialPrefix turns a credential's model ids into callable names: the
+// prefixed id when the credential has a prefix, the bare id otherwise.
+func applyCredentialPrefix(names []string, prefix string) []string {
+	if prefix == "" {
+		return names
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		out = append(out, prefix+"/"+name)
+	}
+	return out
+}
+
+// cleanModelNames drops blank entries and trims the rest, so a padded name in a
+// credential file never becomes a picker candidate that fails to route.
+func cleanModelNames(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, name := range in {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
 
 // ---- JSON request decoding ----
 //
@@ -620,12 +781,13 @@ func (p *plugin) applyGroups(f groupFile) error {
 		}
 	}
 	nameIdx := buildGroupNameIndex(groups, p.cfg.NamePrefix)
+	// Sort before publishing: readers copy p.groups under RLock only.
+	sortGroupsByName(groups)
 	p.mu.Lock()
 	p.groups = groups
 	p.nameIndex = nameIdx
 	p.lastReload = p.rt.now()
 	p.mu.Unlock()
-	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 	p.log.info("组配置已更新", map[string]any{"groups": len(groups)})
 	return nil
 }

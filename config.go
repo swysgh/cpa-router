@@ -23,6 +23,12 @@ type config struct {
 	MaxWait          string `yaml:"max_wait"`
 	LogLevel         string `yaml:"log_level"`
 
+	// FilterModels trims the host's /v1/models response down to the group call
+	// names this plugin advertises. Enabled by default: a client listing models
+	// wants the groups, not every upstream model behind them. Turning it off
+	// leaves the host's full list untouched.
+	FilterModels bool `yaml:"filter_models"`
+
 	// StatsFlushInterval is how often the token counters are written to
 	// stats_file (they are also written once on load/interval ticks).
 	StatsFlushInterval string `yaml:"stats_flush_interval"`
@@ -69,6 +75,7 @@ func defaultConfig() config {
 		MaxWait:            "15s",
 		LogLevel:           "info",
 		StatsFlushInterval: "30s",
+		FilterModels:       true,
 		Cooldown: cooldownConfig{
 			Disable:           false,
 			Statuses:          []int{429},

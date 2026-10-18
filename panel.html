@@ -570,7 +570,7 @@ async function render(){
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
     document.getElementById("ovTokens").textContent=fmtTokens(tokSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.5.0");
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.6.0");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -746,35 +746,70 @@ async function doReset(name,what){
 }
 
 // ---- member name candidates ----
-// The picker's candidates are the host's runtime model catalog plus this
-// plugin's own groups (call name, prefixed alias, internal name). Picking a
-// group nests it; picking anything else calls it as a model. Free-typed names
-// are still accepted through the picker's manual-add chip, so it never blocks a value.
+// The picker's candidates are the union of three sources -- this plugin's own
+// credential catalog, CPAMP's price short names, and the host config's channels
+// (callable names only) -- plus this plugin's own groups (call name, prefixed
+// alias, internal name). Picking a group nests it; picking anything else calls it
+// as a model. Free-typed names are still accepted through the picker's manual-add
+// chip, so it never blocks a value -- but every candidate the picker offers has
+// to be a name the host actually serves, otherwise a click stores a member that
+// answers 400 model_not_found.
 async function loadModelNames(){
   const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
-  // Primary: the host's runtime catalog.
+  const picks = [];
+  // Primary: the plugin's own catalog (credential models + this plugin's group
+  // call names). It never goes through /v1/models, so the trim that hides
+  // upstream names from API clients cannot hide them here.
+  try{
+    const r = await api("/plugins/cpa-router/models","GET");
+    if(r.ok){
+      const j = await r.json();
+      if(j && Array.isArray(j.models)) picks.push(...j.models);
+    }
+  }catch(e){}
+  // CPAMP's price-catalog route (/model-prices/runtime-models). It only exists
+  // on CPAMP, not on the plain host, and what it returns are price short names
+  // (GLM, kimi, deepseek-pro, ...), not callable model ids -- so treat it as a
+  // cheap extra hint, never as the authoritative catalog.
   try{
     const r = await api("/model-prices/runtime-models","GET");
     if(r.ok){
       const j = await r.json();
-      if(j && Array.isArray(j.models) && j.models.length){ MODEL_PICKS = uniq(j.models); return true; }
+      if(j && Array.isArray(j.models)) picks.push(...j.models);
     }
   }catch(e){}
-  // Fallback: derive from the config. This can also list models that are
-  // configured but not currently served, which is still useful for building a group.
+  // The config is the only source that knows about models whose provider keys
+  // live in config.yaml instead of in a credential file, so it is always worth
+  // reading; it can also list models that are configured but not currently served.
+  //
+  // Two rules keep names the host does not serve out of the picker:
+  //   - a disabled channel registers nothing (the host skips a disabled provider
+  //     and a disabled credential alike), so every name under it is dead;
+  //   - the callable id of a prefixed channel IS `prefix + "/" + id` (id = alias
+  //     when set, otherwise name). The host registers that id and, with
+  //     force-model-prefix on, registers ONLY that one -- so the bare name is
+  //     either 400 or a duplicate of the prefixed chip, and the prefix is never
+  //     dropped to build a candidate.
   try{
     const r = await api("/config","GET");
     if(r.ok){
-      const c = await r.json(); const out = [];
-      for(const ch of c["openai-compatibility"]||[]) for(const m of (ch.models||[])) out.push(m.alias||m.name);
+      const c = await r.json();
+      const addModel = (prefix, name, disabled) => {
+        if(disabled || !name) return;
+        const p = String(prefix||"").trim();
+        picks.push(p ? p+"/"+name : name);
+      };
+      for(const ch of c["openai-compatibility"]||[]) for(const m of (ch.models||[])) addModel(ch.prefix, m.alias||m.name, ch.disabled);
       for(const sec of ["gemini-api-key","claude-api-key","codex-api-key","xai-api-key","meta-api-key","interactions-api-key","vertex-api-key"])
-        for(const e of (c[sec]||[])) for(const m of (e.models||[])) out.push(typeof m==="string"?m:(m.alias||m.name));
+        for(const e of (c[sec]||[])) for(const m of (e.models||[])) addModel(e.prefix, typeof m==="string"?m:(m.alias||m.name), e.disabled);
+      // oauth-model-alias entries carry no prefix: their alias already is the
+      // final callable name.
       const oma = c["oauth-model-alias"]||{};
-      for(const k of Object.keys(oma)) for(const m of (oma[k]||[])){ out.push(m.alias); if(m.fork) out.push(m.name); }
-      MODEL_PICKS = uniq(out); return MODEL_PICKS.length > 0;
+      for(const k of Object.keys(oma)) for(const m of (oma[k]||[])){ picks.push(m.alias); if(m.fork) picks.push(m.name); }
     }
   }catch(e){}
-  return false;
+  MODEL_PICKS = uniq(picks);
+  return MODEL_PICKS.length > 0;
 }
 // Group candidates: every group contributes its call name, its prefixed aliases
 // (bare aliases when name_prefix is empty) and its internal name. Both the call

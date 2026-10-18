@@ -254,13 +254,35 @@ const stateSample = {
 };
 
 const requests = [];
+
+// /config 样本照现网 config.yaml 的形状写：openai-compatibility 渠道带 prefix，
+// 模型条目用 name（alias 空串）/ alias（与 name 不同）两种；claude-api-key 条目
+// 自身带 prefix；oauth-model-alias 段不带 prefix。
+const configSample = {
+  "openai-compatibility": [
+    {
+      name: "xhx2api",
+      prefix: "xhx",
+      "base-url": "http://127.0.0.1:3066/v1",
+      models: [
+        { name: "sn-glm-5-3", alias: "" },
+        { name: "sn-kimi-k3", alias: "kimi-k3" },
+      ],
+    },
+  ],
+  "claude-api-key": [
+    { prefix: "trae", models: [{ name: "claude-sonnet-4", alias: "" }] },
+  ],
+  "oauth-model-alias": {},
+};
+
 function fakeFetch(url, opts = {}) {
   const u = String(url);
   requests.push({ url: u, opts });
   let payload;
   if (u.includes("/plugins/cpa-router/state")) payload = stateSample;
   else if (u.includes("/model-prices/runtime-models")) payload = { models: ["ink/glm-5.3", "ink/other-model"] };
-  else if (u.includes("/config")) payload = { "openai-compatibility": [] };
+  else if (u.includes("/config")) payload = configSample;
   else payload = { ok: true };
   return Promise.resolve({
     ok: true,
@@ -407,6 +429,35 @@ await run("搜 ink/glm-5.3 选 chip -> POST body 里是 {model:'ink/glm-5.3',ena
   await els.save.onclick();
   await flush();
   deepEq(lastGroupBody().group.members[0], { model: "ink/glm-5.3", enabled: true });
+});
+
+await run("选择弹窗候选里只保留可路由的渠道前缀名（不再重复裸名）", async () => {
+  await preparePicker();
+  const names = pickChips().map((c) => c.dataset.name);
+  // 现网 force-model-prefix: true 时只有前缀名可路由；裸名既调不通（400
+  // model_not_found）又会让同一个模型在候选里出现两次，所以不再产出。
+  for (const want of ["xhx/sn-glm-5-3", "xhx/kimi-k3", "trae/claude-sonnet-4"]) {
+    if (!names.includes(want)) throw new Error("候选里没有 " + want + ": " + JSON.stringify(names));
+  }
+  for (const stale of ["sn-glm-5-3", "kimi-k3", "claude-sonnet-4"]) {
+    if (names.includes(stale)) throw new Error("候选里不该有裸名 " + stale + ": " + JSON.stringify(names));
+  }
+  els.pickDone.onclick();
+});
+
+await run("搜 xhx/sn-glm-5-3 选 chip -> POST body 里是 {model:'xhx/sn-glm-5-3',enabled:true}", async () => {
+  await preparePicker();
+  searchFor("xhx/sn-glm-5-3");
+  const chip = chipByName("xhx/sn-glm-5-3");
+  if (!chip) throw new Error("搜索 xhx/sn-glm-5-3 后没有对应 chip");
+  // 必须是真的候选 chip，而不是搜索框兜底的「＋ 添加」手动项——否则这条测不出
+  // 候选里到底有没有前缀名。
+  if (chip.classList.contains("manual")) throw new Error("xhx/sn-glm-5-3 只是手动添加项，不在候选里");
+  chip.onclick();
+  els.pickDone.onclick();
+  await els.save.onclick();
+  await flush();
+  deepEq(lastGroupBody().group.members[0], { model: "xhx/sn-glm-5-3", enabled: true });
 });
 
 await run("编辑含 {group:'GLM'} 的组、原样保存 -> 该成员仍是 {group:'GLM',enabled:true}", async () => {
