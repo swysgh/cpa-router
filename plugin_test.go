@@ -145,7 +145,7 @@ func TestRegistrationDeclaresResponseInterceptorAndFilterField(t *testing.T) {
 	if v, _ := decoded.Capabilities["response_interceptor"].(bool); !v {
 		t.Errorf("capabilities.response_interceptor = %v, want true", decoded.Capabilities["response_interceptor"])
 	}
-	if decoded.Metadata.Version != "0.7.0" {
+	if decoded.Metadata.Version != "0.8.0" {
 		t.Errorf("version = %q, want 0.7.0", decoded.Metadata.Version)
 	}
 

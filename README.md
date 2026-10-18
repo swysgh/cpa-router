@@ -208,11 +208,18 @@ body 原样透传 —— 面板和 CPAMP 后台要靠这份清单给操作员选
 给面板「添加成员」用的模型清单，用管理密钥鉴权，返回
 `{"models":["<上游模型名>","<组调用名>",...]}`（去重、升序）。
 
-宿主没有「列出全部模型」的回调，所以清单由凭证拼出来：`host.auth.list` 枚举凭证 →
-逐个 `host.auth.get` 读 JSON → 取 `models` 字段（`["a","b"]` 与 `[{"name":"a","alias":"x"}]` 两种形态都支持，
-alias 也算可调用名）→ 并上本插件启用组的调用名。没有落盘文件的 `runtime_only` 凭证读不出来就跳过。
-凭证里的 `prefix`（如 antigravity 的 `"prefix":"anti"`）会拼进名字（`anti/<模型名>`）：宿主注册的就是
-`prefix + "/" + id`，`force-model-prefix: true` 时裸名根本不存在；被禁用的凭证宿主会整条注销，直接跳过。
+宿主没有「列出全部模型」的回调，所以清单由三处拼出来：
+
+1. **凭证文件**：`host.auth.list` 枚举 → 逐个 `host.auth.get` 读 JSON → 取 `models` 字段（`["a","b"]` 与
+   `[{"name":"a","alias":"x"}]` 两种形态都支持，alias 也算可调用名）。凭证里的 `prefix`（如 antigravity 的
+   `"prefix":"anti"`）会拼进名字（`anti/<模型名>`）：宿主注册的就是 `prefix + "/" + id`，`force-model-prefix: true`
+   时裸名根本不存在；被禁用的凭证宿主会整条注销，直接跳过。
+2. **宿主模型清单快照**（registry）：`response.intercept_after` 看到的每一份 `/v1/models` 响应，在过滤/放行之前
+   先把其中的 id 记进内存缓存。这是唯一能覆盖 OAuth 凭据模型（如 antigravity 的 `anti/*`）的来源 —— 这类模型
+   只存在于 provider 元数据里，凭证 JSON 没有 `models` 字段、`config.yaml` 也没有对应渠道。缓存是**内存态**：
+   宿主重启后为空，要等宿主出过一次 `/v1/models`（任何客户端拉一次即可）才填上；响应里用
+   `registry_seen_at` / `registry_models` 报告快照时间与条数，面板在缓存为空时会提示。
+3. **本插件启用组的调用名**（与 `model.register` 同一份快照）。
 
 面板把这份清单、`/model-prices/runtime-models`（CPAMP 的价格目录短名，宿主 8317 上不存在）与 `/config`（`config.yaml` 里声明的
 渠道模型）三者取并集：密钥写在 `config.yaml` 里的渠道在凭证文件里没有 `models` 字段，只有 `/config` 能拿到。

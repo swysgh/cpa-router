@@ -50,6 +50,14 @@ type runtimeState struct {
 	// skip a flush when nothing changed.
 	tokenUpdates int64
 
+	// registry is the id list of the last model list the host produced, and
+	// registryAt is when it was seen. It is the only complete picture of what the
+	// host serves: OAuth credentials (antigravity, ...) declare their models in
+	// provider metadata, not in the "models" field the credential catalog reads,
+	// so without this the member picker cannot offer their names at all.
+	registry   []string
+	registryAt time.Time
+
 	nowFunc func() time.Time
 	rng     *rand.Rand
 }
@@ -65,6 +73,40 @@ func newRuntimeState() *runtimeState {
 		nowFunc:     time.Now,
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+}
+
+// rememberRegistry stores the ids of a model list the host just produced. The
+// ids are copied, so the caller's slice is never retained.
+func (r *runtimeState) rememberRegistry(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	copied := make([]string, len(ids))
+	copy(copied, ids)
+	r.mu.Lock()
+	r.registry = copied
+	r.registryAt = r.nowLocked()
+	r.mu.Unlock()
+}
+
+// registrySnapshot returns the cached registry ids and when they were seen.
+func (r *runtimeState) registrySnapshot() ([]string, time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.registry) == 0 {
+		return nil, time.Time{}
+	}
+	out := make([]string, len(r.registry))
+	copy(out, r.registry)
+	return out, r.registryAt
+}
+
+// nowLocked is now() for callers that already hold r.mu.
+func (r *runtimeState) nowLocked() time.Time {
+	if r.nowFunc == nil {
+		return time.Now()
+	}
+	return r.nowFunc()
 }
 
 // now returns the current time via the injected clock (test seam).

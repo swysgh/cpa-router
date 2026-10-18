@@ -233,7 +233,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 
 	body := map[string]any{
 		"version": 1,
-		"plugin":  map[string]any{"version": "0.7.0", "name": "cpa-router"},
+		"plugin":  map[string]any{"version": "0.8.0", "name": "cpa-router"},
 		"config": map[string]any{
 			"state_file":           cfg.StateFile,
 			"stats_file":           cfg.StatsFile,
@@ -275,18 +275,27 @@ func groupsView(v []map[string]any) []map[string]any { return v }
 // this endpoint answers the same question with the management key the panel
 // already holds.
 //
-// The host exposes no "list models" callback, so the catalog is assembled from
-// the credentials: host.auth.list gives the entries, host.auth.get gives each
-// one's JSON, and the "models" field of that JSON is what the credential can
-// serve.
+// The catalog is assembled from three sources:
+//
+//   - the credential files (host.auth.list + host.auth.get): the "models" field
+//     they declare, prefixed with the credential's own prefix;
+//   - the registry cache (intercept.go): the ids of the last model list the host
+//     produced. This is the only source that covers OAuth credentials whose model
+//     list lives in provider metadata (antigravity: "anti/<model>"), which no
+//     credential JSON and no config channel declares; it is empty until the host
+//     answers a model list once (any client's /v1/models call fills it);
+//   - this plugin's enabled group call names, from the same snapshot model.register
+//     uses, so the picker never offers a group the plugin does not advertise.
 func (p *plugin) handleModelsList(req managementRequest) (*pluginapi.ManagementResponse, error) {
 	models, err := p.collectCredentialModels()
 	if err != nil {
 		p.log.warn("枚举凭证模型失败", map[string]any{"error": err.Error()})
 		return mgmtResponse(http.StatusInternalServerError, map[string]any{"ok": false, "error": "枚举凭证模型失败: " + err.Error()}), nil
 	}
-	// Group call names come from the same snapshot model.register uses, so the
-	// picker never offers a group the plugin does not advertise.
+	registry, registryAt := p.rt.registrySnapshot()
+	for _, name := range registry {
+		models[name] = true
+	}
 	p.callNameSnapshot().forEachEnabledCallName(func(id string, _ group) { models[id] = true })
 
 	out := make([]string, 0, len(models))
@@ -294,7 +303,14 @@ func (p *plugin) handleModelsList(req managementRequest) (*pluginapi.ManagementR
 		out = append(out, name)
 	}
 	sort.Strings(out)
-	return mgmtResponse(http.StatusOK, map[string]any{"models": out}), nil
+	body := map[string]any{"models": out}
+	// The panel shows how fresh the registry part is, so an empty catalog right
+	// after a restart reads as "host has not listed models yet" instead of a bug.
+	if len(registry) > 0 {
+		body["registry_seen_at"] = registryAt.Unix()
+		body["registry_models"] = len(registry)
+	}
+	return mgmtResponse(http.StatusOK, body), nil
 }
 
 // collectCredentialModels enumerates the model names declared by every host

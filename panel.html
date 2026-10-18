@@ -537,6 +537,7 @@ let MODEL_PICKS = [];   // host runtime model catalog
 let GROUP_PICKS = [];   // group call names + prefixed aliases + internal names
 let GROUP_MAP = {};     // internal name -> group (for cooling recursion)
 let NAME_PREFIX = "";   // from /state config; aliases are callable as prefix+alias
+let REGISTRY_SEEN_AT = 0; // unix secs of the host model-list snapshot (0 = not cached yet)
 let modelNamesState = "idle"; // idle | loading | done
 
 async function render(){
@@ -757,14 +758,15 @@ async function doReset(name,what){
 async function loadModelNames(){
   const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
   const picks = [];
-  // Primary: the plugin's own catalog (credential models + this plugin's group
-  // call names). It never goes through /v1/models, so the trim that hides
-  // upstream names from API clients cannot hide them here.
+  // Primary: the plugin's own catalog (credential models + the host model-list
+  // snapshot + this plugin's group call names). It never goes through /v1/models,
+  // so the trim that hides upstream names from API clients cannot hide them here.
   try{
     const r = await api("/plugins/cpa-router/models","GET");
     if(r.ok){
       const j = await r.json();
       if(j && Array.isArray(j.models)) picks.push(...j.models);
+      if(j && j.registry_seen_at) REGISTRY_SEEN_AT=Number(j.registry_seen_at)||0;
     }
   }catch(e){}
   // CPAMP's price-catalog route (/model-prices/runtime-models). It only exists
@@ -828,8 +830,17 @@ function memberPayload(name, enabled){ return memberTypeOf(name)==="group" ? {gr
 function refreshDatalists(){
   const hint=document.getElementById("pickHint");
   if(hint) hint.textContent = (MODEL_PICKS.length || GROUP_PICKS.length)
-    ? "模型 "+MODEL_PICKS.length+" 个 / 组 "+GROUP_PICKS.length+" 个"
+    ? "模型 "+MODEL_PICKS.length+" 个 / 组 "+GROUP_PICKS.length+" 个"+registryHint()
     : "";
+}
+// The plugin's catalog carries the host's own model list only after the host has
+// answered one /v1/models request since it started (that response is the only
+// complete picture -- OAuth credentials such as antigravity keep their models in
+// provider metadata, not in the credential's "models" field). A cold cache means
+// names like anti/* are simply not known yet, so say so instead of letting it
+// look like the models disappeared.
+function registryHint(){
+  return REGISTRY_SEEN_AT ? "" : "（宿主模型清单未缓存：anti/* 这类 OAuth 模型要等宿主出过一次 /v1/models 才会出现）";
 }
 function ensureModelNames(){
   if(modelNamesState !== "idle") return;

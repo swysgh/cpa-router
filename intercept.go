@@ -104,6 +104,29 @@ func (p *plugin) filterModelList(sourceFormat string, headers http.Header, body 
 	if sourceFormat != modelListSourceFormat {
 		return nil, false
 	}
+
+	// Parse before any bypass decision. The ids of a model list are also the only
+	// complete picture of what the host serves -- an OAuth credential declares its
+	// models in provider metadata, not in the "models" field the credential
+	// catalog reads -- so every model list the host produces refreshes the cache
+	// the member picker reads (management.go). This runs for every successful
+	// non-streaming response (the host routes them all through
+	// response.intercept_after), so it is deliberately a plain parse with no
+	// heuristic pre-gate: json.RawMessage aliases the input bytes, so the cost is
+	// one pass over the body and a handful of map entries, and a substring guess
+	// could only ever skip work by mistake (a model list whose "list" is escaped
+	// would silently go unfiltered).
+	//
+	// A body that cannot be proven to be an OpenAI model list (another source
+	// format, a chat/completions response, truncated or invalid JSON, a
+	// missing/non-array "data") caches nothing and reports "unchanged", which
+	// leaves the host's bytes exactly as they were.
+	root, items, ok := parseModelList(body)
+	if !ok {
+		return nil, false
+	}
+	p.rt.rememberRegistry(modelIDsOf(items))
+
 	if isInternalRequest(headers) {
 		return nil, false
 	}
@@ -112,33 +135,6 @@ func (p *plugin) filterModelList(sourceFormat string, headers http.Header, body 
 	enabled := p.cfg.FilterModels
 	p.mu.RUnlock()
 	if !enabled {
-		return nil, false
-	}
-
-	// Decode into raw fields so every key we do not touch (the root's siblings,
-	// and each model's created / owned_by / anything the host adds later)
-	// survives verbatim.
-	//
-	// This runs for every successful non-streaming response (the host routes
-	// them all through response.intercept_after), so it is deliberately a plain
-	// parse with no heuristic pre-gate: json.RawMessage aliases the input bytes,
-	// so the cost is one pass over the body and a handful of map entries, and a
-	// substring guess could only ever skip work by mistake (a model list whose
-	// "list" is escaped would silently go unfiltered).
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(body, &root); err != nil {
-		return nil, false
-	}
-	var object string
-	if rawObject, ok := root["object"]; !ok || json.Unmarshal(rawObject, &object) != nil || object != "list" {
-		return nil, false
-	}
-	rawData, ok := root["data"]
-	if !ok {
-		return nil, false
-	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(rawData, &items); err != nil {
 		return nil, false
 	}
 
@@ -169,6 +165,49 @@ func (p *plugin) filterModelList(sourceFormat string, headers http.Header, body 
 		return nil, false
 	}
 	return out, true
+}
+
+// parseModelList decodes a body that is provably an OpenAI model list: a JSON
+// object whose top-level "object" is "list" and whose "data" is an array. It
+// returns the root fields untouched (so every key we do not rewrite survives
+// verbatim) plus the raw entries, and reports false for anything else.
+func parseModelList(body []byte) (map[string]json.RawMessage, []json.RawMessage, bool) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, nil, false
+	}
+	var object string
+	if rawObject, ok := root["object"]; !ok || json.Unmarshal(rawObject, &object) != nil || object != "list" {
+		return nil, nil, false
+	}
+	rawData, ok := root["data"]
+	if !ok {
+		return nil, nil, false
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(rawData, &items); err != nil {
+		return nil, nil, false
+	}
+	return root, items, true
+}
+
+// modelIDsOf reads the ids out of model list entries, skipping entries without a
+// readable id (the same tolerance the filter uses: an unreadable entry is never
+// proven to be ours).
+func modelIDsOf(items []json.RawMessage) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		var entry struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(item, &entry); err != nil {
+			continue
+		}
+		if id := strings.TrimSpace(entry.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // allowedModelIDs is the set of call names this plugin advertises as models: the

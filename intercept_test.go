@@ -115,7 +115,66 @@ func enabledGroup(name string, aliases ...string) rawGroup {
 		Members: []rawMember{{Model: "m1", Enabled: true}}}
 }
 
-// ---- filtering ----
+// ---- registry cache ----
+
+// A model list the host produces is the only complete picture of what it serves
+// (an OAuth credential such as antigravity declares its models in provider
+// metadata, not in a "models" field), so every one of them refreshes the cache
+// the member picker reads -- including the lists the interceptor deliberately
+// leaves untouched, and including the ones it rewrites.
+func TestInterceptCachesRegistryFromEveryModelList(t *testing.T) {
+	p := interceptPlugin(t, "r/", true, enabledGroup("free"))
+
+	// Internal (console) request: the body is handed back untouched, but the ids
+	// are still the host's registry.
+	internal := http.Header{}
+	internal.Set("Referer", "http://host:8317/v0/resource/plugins/cpa-router/panel")
+	if got := interceptWithHeaders(t, p, modelListSourceFormat, internal,
+		modelListJSON(t, `{"id":"anti/gemini-3-flash"}`, `{"id":"r/free"}`)); len(got.Body) != 0 {
+		t.Fatalf("internal request must stay untouched, got %s", got.Body)
+	}
+	ids, at := p.rt.registrySnapshot()
+	if !reflect.DeepEqual(ids, []string{"anti/gemini-3-flash", "r/free"}) {
+		t.Fatalf("registry = %v", ids)
+	}
+	if at.IsZero() {
+		t.Error("registry timestamp must be set")
+	}
+
+	// Client request (filtered): the cache must hold the host's full list, not the
+	// trimmed answer.
+	if got := intercept(t, p, modelListSourceFormat,
+		modelListJSON(t, `{"id":"anti/gemini-3-flash"}`, `{"id":"r/free"}`)); len(got.Body) == 0 {
+		t.Fatal("a client model list with non-group ids must be trimmed")
+	}
+	ids, _ = p.rt.registrySnapshot()
+	if !reflect.DeepEqual(ids, []string{"anti/gemini-3-flash", "r/free"}) {
+		t.Fatalf("registry after a filtered list = %v", ids)
+	}
+}
+
+// Bodies that are not provably OpenAI model lists must not poison the cache: a
+// chat completion, another source format, or invalid JSON.
+func TestInterceptDoesNotCacheNonModelLists(t *testing.T) {
+	p := interceptPlugin(t, "r/", true, enabledGroup("free"))
+	for _, tc := range []struct {
+		name   string
+		format string
+		body   string
+	}{
+		{"chat completion", modelListSourceFormat, `{"object":"chat.completion","data":[{"id":"nope"}]}`},
+		{"other source format", "claude", `{"object":"list","data":[{"id":"nope"}]}`},
+		{"invalid json", modelListSourceFormat, `{`},
+		{"no data array", modelListSourceFormat, `{"object":"list","data":"nope"}`},
+	} {
+		if got := intercept(t, p, tc.format, []byte(tc.body)); len(got.Body) != 0 {
+			t.Fatalf("%s must stay untouched, got %s", tc.name, got.Body)
+		}
+		if ids, _ := p.rt.registrySnapshot(); ids != nil {
+			t.Fatalf("%s cached ids: %v", tc.name, ids)
+		}
+	}
+}
 
 // The filter keeps exactly the call names the plugin advertises: enabled group
 // names and aliases with name_prefix, and nothing else — not the upstream models

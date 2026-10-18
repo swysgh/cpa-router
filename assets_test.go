@@ -269,6 +269,14 @@ func TestPanelMemberNamePickers(t *testing.T) {
 	if !strings.Contains(html, "refreshDatalists()") {
 		t.Error("panel.html must refresh the picker after loading")
 	}
+	// OAuth models (antigravity's anti/*) are only in the catalog once the host has
+	// answered a model list, so the panel must surface that snapshot and say when
+	// it is still missing instead of showing a silently short candidate list.
+	for _, want := range []string{"registry_seen_at", "registryHint("} {
+		if !strings.Contains(html, want) {
+			t.Errorf("panel.html must surface the host model-list snapshot: missing %q", want)
+		}
+	}
 }
 
 // The unified picker must be able to emit either body shape: a name that matches

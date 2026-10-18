@@ -463,6 +463,54 @@ func TestModelsListFromCredentials(t *testing.T) {
 	}
 }
 
+// The endpoint's third source is the registry cache: the ids of the last model
+// list the host produced. It is the only way the picker can offer OAuth models
+// (antigravity's "anti/<model>"), which no credential JSON and no config channel
+// declares. The response reports how many registry ids it used so a cold cache is
+// diagnosable instead of looking like a missing model.
+func TestModelsListIncludesCachedRegistry(t *testing.T) {
+	p := modelsListPlugin(t,
+		[]map[string]any{{"auth_index": "a1", "name": "zen.json"}},
+		map[string]string{"a1": `{"models":["big-pickle"]}`},
+		enabledGroup("free"),
+	)
+	p.rt.rememberRegistry([]string{"anti/gemini-3-flash", "anti/auto", "r/free"})
+
+	raw, err := mgmtRaw(t, p, "GET", "/plugins/cpa-router/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeMgmtJSON(t, raw)
+	want := []string{"anti/auto", "anti/gemini-3-flash", "big-pickle", "r/free"}
+	if got := modelNamesOf(t, m); !reflect.DeepEqual(got, want) {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+	if got := m["registry_models"]; got != float64(3) {
+		t.Errorf("registry_models = %v, want 3", got)
+	}
+	if _, ok := m["registry_seen_at"]; !ok {
+		t.Error("registry_seen_at must be reported when the cache is warm")
+	}
+}
+
+// With a cold cache the endpoint still answers: credential models + group names,
+// and no registry fields (the panel uses their absence to say the host has not
+// listed models yet).
+func TestModelsListColdRegistryOmitsRegistryFields(t *testing.T) {
+	p := modelsListPlugin(t, nil, nil, enabledGroup("free"))
+	raw, err := mgmtRaw(t, p, "GET", "/plugins/cpa-router/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeMgmtJSON(t, raw)
+	if _, ok := m["registry_seen_at"]; ok {
+		t.Error("cold cache must not report registry_seen_at")
+	}
+	if _, ok := m["registry_models"]; ok {
+		t.Error("cold cache must not report registry_models")
+	}
+}
+
 // A disabled credential is unregistered by the host, so its models cannot be
 // called at all; listing them would hand the picker dead candidates that answer
 // 400 model_not_found on the first attempt.
