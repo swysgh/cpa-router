@@ -341,7 +341,7 @@ func (p *plugin) registrationJSON() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "cpa-router",
-			Version:          "0.9.0",
+			Version:          pluginVersion,
 			Author:           "swysgh",
 			GitHubRepository: "https://github.com/swysgh/cpa-router",
 			Logo:             "",
@@ -377,6 +377,10 @@ func (p *plugin) registrationJSON() registration {
 		},
 	}
 }
+
+// pluginVersion is the single source of truth for the version reported to the
+// host (registration) and to the panel (/state).
+const pluginVersion = "0.9.1"
 
 // modelProviderName is the provider key the plugin registers its models under.
 const modelProviderName = "cpa-router"
