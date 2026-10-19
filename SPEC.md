@@ -155,6 +155,10 @@ plugins:
       usage_report_url: ""   # CPAMP 用量补报地址（如 http://cpa-manager-plus:18317/v0/management/usage/import），空 = 不补报
       usage_report_key_file: "" # 管理密钥文件路径（如 /run/secrets/cpamp_admin_key）
       usage_report_interval: "5s" # 补报批量发送间隔
+      sticky: false          # 轮询组粘性会话：同一会话固定打同一成员（只影响 round-robin）
+      sticky_ttl: "30m"      # 粘性有效期，命中即续期
+      sticky_headers: ["X-Session-Id", "Session-Id", "X-Conversation-Id", "X-Session-Affinity", "X-Opencode-Session", "X-Client-Session-Id"]
+      sticky_body_fingerprint: true # 没有会话请求头时，用请求体的对话根做指纹
       cooldown:
         disable: false
         statuses: [429]              # 触发指数退避的状态码
@@ -177,6 +181,7 @@ plugins:
 - `cooldown.max >= cooldown.base`，`cooldown.transient_max >= cooldown.transient_base`。
 - `statuses` / `transient_statuses` 里每个值必须是 100..599 的整数。
 - `name_prefix` 只能包含 `[A-Za-z0-9._:/-]`。
+- `sticky_ttl` 必须是 `> 0` 的时长；`sticky: true` 时 `sticky_headers` 与 `sticky_body_fingerprint` 不能同时为空（否则没有会话标识来源）。
 - `state_file` 为空 → 允许（纯内存模式，UI 改动不落盘，并在 UI 上提示）。
 
 ### 验收
@@ -259,26 +264,34 @@ groups:
 ### 7.2 展开（把组展开成有序的模型名列表）
 
 ```
-expand(groupName, depth, visited):
+expand(groupName, depth, visited, stickyKey):
   if depth > 8            -> 报错 "嵌套层数超过 8"
   if groupName in visited -> 报错 "循环嵌套"   (双保险)
+  if !sticky              -> stickyKey = ""
   g = groups[groupName]
   if g == nil or !g.enabled -> 返回空
   eligible = [m for m in g.members if m.enabled and (m 是 model 时该模型不在冷却中)]
   if strategy == "round-robin":
-      start = pointer[groupName] % len(eligible)      # eligible 非空时
+      start = -1
+      if stickyKey != "" and sticky[key(group, stickyKey)] 命中且其成员仍在 eligible:
+          start = 该成员在 eligible 的下标            # 命中即续期 sticky_ttl
+      if start < 0:
+          start = pointer[groupName] % len(eligible)   # eligible 非空时
+          pointer[groupName] = start + 1
+          if stickyKey != "": 记录 sticky[key(group, stickyKey)] = eligible[start] 的成员身份
       eligible = eligible[start:] + eligible[:start]
-      pointer[groupName] = start + 1
-  # fallback: 保持声明顺序，pointer 不变
+  # fallback: 保持声明顺序，pointer 与 sticky 都不参与
   out = []
   for m in eligible:
       if m 是 model: out.append(m.model)
-      else:          out.extend(expand(m.group, depth+1, visited + {groupName}))
+      else:          out.extend(expand(m.group, depth+1, visited + {groupName}, stickyKey))
   return out
 ```
 
 要点：
 - **轮询指针按「组」维护，每次展开该组就前进 1**（`start+1`），所以每个请求都会换一个首选成员；同一个请求内部失败降级时仍按本次展开的顺序走。
+- **粘性会话（`sticky`）只作用于 `round-robin`**：会话键先按 `sticky_headers` 顺序取第一个非空请求头，取不到时（`sticky_body_fingerprint: true`）用请求体的对话根（instructions/system 前 50 字 + 首条 user 前 200 字）做 SHA-256 指纹。命中已有绑定就不再推进轮询指针；绑定成员进了冷却就自动重新绑定到本次选中的成员。绑定按「组 + 会话键」隔离，嵌套组各自维护，TTL 命中即续期。
+- **管理端 `/test` 不参与粘性**：它用固定合成 body 发探测请求，若写入绑定会劫持真实会话。
 - **冷却中的成员在展开阶段就被摘掉**（这就是需求里的「移除 429 的请求」）。
 - 去重：同一个模型名在一次展开结果里只保留**第一次**出现（避免同一请求重复打同一个上游）。
 - `max_attempts > 0` 时截断到该长度。

@@ -16,6 +16,9 @@
   - `round-robin`（轮询组）：在组成员之间轮流分发；
   - `fallback`（降级组）：按声明顺序依次尝试，成功即止。
 - **可嵌套**：组的成员可以是另一个组（任意层，加载时检测环）。
+- **粘性会话（可选，`sticky`）**：轮询组里同一会话固定打同一成员（默认关闭）。会话标识优先取
+  `sticky_headers`（如 `X-Session-Id`），取不到就用请求体的对话根（system + 首条 user）做指纹；
+  绑定 `sticky_ttl` 内有效、命中即续期，绑定成员进冷却会自动改绑。
 - **429 移除 + 指数退避**：某成员返回 429（或配置的 `cooldown.statuses`）时把它从可用
   池里**摘掉**（冷却），冷却时长按指数退避增长；冷却中的成员不会被选中（除非整组都在
   冷却，见 `all_cooling_policy`）。
@@ -58,6 +61,10 @@
          all_cooling_policy: "wait" # wait | first | error
          max_wait: "15s"        # wait 策略的最长等待
          log_level: "info"      # debug | info | warn | error
+         sticky: false          # 轮询组粘性会话（只影响 round-robin）
+         sticky_ttl: "30m"      # 绑定有效期，命中即续期
+         sticky_headers: ["X-Session-Id", "Session-Id", "X-Conversation-Id"]
+         sticky_body_fingerprint: true # 无会话头时用对话根做指纹
          cooldown:
            disable: false
            statuses: [429]              # 触发指数退避的状态码

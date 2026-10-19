@@ -448,7 +448,7 @@ func (p *plugin) handleTest(req managementRequest) (*pluginapi.ManagementRespons
 	// show which member was actually tried, with what status and cooldown.
 	var trace []attemptTrace
 	if in.Stream {
-		_, _ = p.executeStreamTraced(marshalExec(execReq), &trace)
+		_, _ = p.executeStreamWithSticky(marshalExec(execReq), &trace, false)
 		// Only the synchronous preflight is traced; the forwarding that follows is
 		// asynchronous and outlives this call.
 		return mgmtResponse(http.StatusOK, map[string]any{
@@ -460,7 +460,7 @@ func (p *plugin) handleTest(req managementRequest) (*pluginapi.ManagementRespons
 		}), nil
 	}
 
-	raw, err := p.executeTraced(marshalExec(execReq), &trace)
+	raw, err := p.executeWithSticky(marshalExec(execReq), &trace, false)
 	latency := int(p.rt.now().Sub(start).Milliseconds())
 	if err != nil {
 		return mgmtResponse(http.StatusOK, map[string]any{
@@ -554,7 +554,7 @@ func (p *plugin) buildTestBody(g *group, override, prompt string) []byte {
 	model := override
 	if model == "" {
 		// Use the first expanded member (or group call name fallback).
-		if attempts, err := p.expand(g.Name, 1, map[string]bool{}, false); err == nil && len(attempts) > 0 {
+		if attempts, err := p.expand(g.Name, 1, map[string]bool{}, false, ""); err == nil && len(attempts) > 0 {
 			model = attempts[0]
 		} else {
 			model = g.Name

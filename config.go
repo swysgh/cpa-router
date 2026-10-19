@@ -34,6 +34,15 @@ type config struct {
 	UsageReportKeyFile  string `yaml:"usage_report_key_file"`
 	UsageReportInterval string `yaml:"usage_report_interval"`
 
+	// Sticky pins a session to one round-robin member for StickyTTL so that a
+	// conversation keeps hitting the same upstream instead of rotating on every
+	// turn. Session keys come from StickyHeaders first, then (when
+	// StickyBodyFingerprint is on) from the conversation root in the body.
+	Sticky                bool     `yaml:"sticky"`
+	StickyTTL             string   `yaml:"sticky_ttl"`
+	StickyHeaders         []string `yaml:"sticky_headers"`
+	StickyBodyFingerprint bool     `yaml:"sticky_body_fingerprint"`
+
 	Cooldown cooldownConfig `yaml:"cooldown"`
 
 	// Parsed durations (filled by decodeConfig / validateConfig).
@@ -43,6 +52,7 @@ type config struct {
 	MaxWaitDur             time.Duration `yaml:"-"`
 	StatsFlushIntervalDur  time.Duration `yaml:"-"`
 	UsageReportIntervalDur time.Duration `yaml:"-"`
+	StickyTTLDur           time.Duration `yaml:"-"`
 	CooldownBase           time.Duration `yaml:"-"`
 	CooldownMax            time.Duration `yaml:"-"`
 	CooldownTransientBase  time.Duration `yaml:"-"`
@@ -78,6 +88,17 @@ func defaultConfig() config {
 		LogLevel:            "info",
 		StatsFlushInterval:  "30s",
 		UsageReportInterval: "5s",
+		Sticky:              false,
+		StickyTTL:           "30m",
+		StickyHeaders: []string{
+			"X-Session-Id",
+			"Session-Id",
+			"X-Conversation-Id",
+			"X-Session-Affinity",
+			"X-Opencode-Session",
+			"X-Client-Session-Id",
+		},
+		StickyBodyFingerprint: true,
 		Cooldown: cooldownConfig{
 			Disable:           false,
 			Statuses:          []int{429},
@@ -101,6 +122,7 @@ func defaultConfig() config {
 	cfg.MaxWaitDur = 15 * time.Second
 	cfg.StatsFlushIntervalDur = 30 * time.Second
 	cfg.UsageReportIntervalDur = 5 * time.Second
+	cfg.StickyTTLDur = 30 * time.Minute
 	cfg.CooldownBase = 30 * time.Second
 	cfg.CooldownMax = 30 * time.Minute
 	cfg.CooldownTransientBase = 15 * time.Second
@@ -186,6 +208,22 @@ func validateConfig(cfg *config) error {
 	if err != nil {
 		return err
 	}
+	sth, err := parseDurationField("sticky_ttl", cfg.StickyTTL, false)
+	if err != nil {
+		return err
+	}
+	// Normalize header names: an empty or blank entry would match nothing but
+	// silently widen the list, so drop them here instead of at request time.
+	headers := make([]string, 0, len(cfg.StickyHeaders))
+	for _, h := range cfg.StickyHeaders {
+		if h = strings.TrimSpace(h); h != "" {
+			headers = append(headers, h)
+		}
+	}
+	cfg.StickyHeaders = headers
+	if cfg.Sticky && len(headers) == 0 && !cfg.StickyBodyFingerprint {
+		return fmt.Errorf("配置错误: sticky: 开启后至少要有 sticky_headers 或 sticky_body_fingerprint 之一作为会话标识来源")
+	}
 	cb, err := parseDurationField("cooldown.base", cfg.Cooldown.Base, false)
 	if err != nil {
 		return err
@@ -252,6 +290,7 @@ func validateConfig(cfg *config) error {
 	cfg.MaxWaitDur = mw
 	cfg.StatsFlushIntervalDur = sfi
 	cfg.UsageReportIntervalDur = uri
+	cfg.StickyTTLDur = sth
 	cfg.CooldownBase = cb
 	cfg.CooldownMax = cm
 	cfg.CooldownTransientBase = ctb

@@ -341,7 +341,7 @@ func (p *plugin) registrationJSON() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "cpa-router",
-			Version:          "0.6.0",
+			Version:          "0.9.0",
 			Author:           "swysgh",
 			GitHubRepository: "https://github.com/swysgh/cpa-router",
 			Logo:             "",
@@ -360,6 +360,10 @@ func (p *plugin) registrationJSON() registration {
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPAMP 用量补报地址（如 http://cpa-manager-plus:18317/v0/management/usage/import），空 = 不补报"},
 				{Name: "usage_report_key_file", Type: pluginapi.ConfigFieldTypeString, Description: "管理密钥文件路径（如 /run/secrets/cpamp_admin_key）"},
 				{Name: "usage_report_interval", Type: pluginapi.ConfigFieldTypeString, Description: "用量补报批量发送间隔，如 5s"},
+				{Name: "sticky", Type: pluginapi.ConfigFieldTypeBoolean, Description: "轮询组的粘性会话：同一会话固定打同一成员（仅 round-robin 生效）"},
+				{Name: "sticky_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "粘性会话有效期（命中即续期），如 30m"},
+				{Name: "sticky_headers", Type: pluginapi.ConfigFieldTypeArray, Description: "会话标识请求头，按顺序取第一个非空值"},
+				{Name: "sticky_body_fingerprint", Type: pluginapi.ConfigFieldTypeBoolean, Description: "没有会话请求头时，用请求体的对话根（system + 首条 user）做指纹"},
 			},
 		},
 		Capabilities: registrationCapability{

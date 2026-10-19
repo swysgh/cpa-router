@@ -35,6 +35,13 @@ type groupStat struct {
 	Fail  int64
 }
 
+// stickyEntry is one session-affinity assignment: which round-robin member a
+// session key is pinned to, and when the pin lapses (§7.2).
+type stickyEntry struct {
+	Member  string
+	Expires time.Time
+}
+
 // runtimeState holds all mutable per-request runtime state. It is protected by
 // a mutex and safe for concurrent use (§12).
 type runtimeState struct {
@@ -45,6 +52,8 @@ type runtimeState struct {
 	tokens      map[string]*tokenStat
 	groupTokens map[string]*tokenStat
 	pointers    map[string]int
+	sticky      map[string]*stickyEntry
+	stickySweep time.Time
 
 	// tokenUpdates counts recorded usage reports; it lets the periodic writer
 	// skip a flush when nothing changed.
@@ -62,6 +71,7 @@ func newRuntimeState() *runtimeState {
 		tokens:      make(map[string]*tokenStat),
 		groupTokens: make(map[string]*tokenStat),
 		pointers:    make(map[string]int),
+		sticky:      make(map[string]*stickyEntry),
 		nowFunc:     time.Now,
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -250,6 +260,54 @@ func (r *runtimeState) pointerAdvance(name string) int {
 	p := r.pointers[name]
 	r.pointers[name] = p + 1
 	return p
+}
+
+// stickyMapKey scopes one session key to one group: two groups called from the
+// same conversation get independent pins.
+func stickyMapKey(group, key string) string { return group + "\x00" + key }
+
+// stickyMember returns the member pinned to this session, or "" when there is
+// no live pin. A hit refreshes the TTL so an active conversation never lapses
+// mid-flight.
+func (r *runtimeState) stickyMember(group, key string, ttl time.Duration) string {
+	if key == "" || ttl <= 0 {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	mk := stickyMapKey(group, key)
+	e, ok := r.sticky[mk]
+	if !ok {
+		return ""
+	}
+	now := r.clock()
+	if !e.Expires.After(now) {
+		delete(r.sticky, mk)
+		return ""
+	}
+	e.Expires = now.Add(ttl)
+	return e.Member
+}
+
+// stickyAssign pins member to this session. Expired pins are swept here rather
+// than on a timer: the map only grows with distinct conversations, and this is
+// the only place it grows.
+func (r *runtimeState) stickyAssign(group, key, member string, ttl time.Duration) {
+	if key == "" || ttl <= 0 || member == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.clock()
+	r.sticky[stickyMapKey(group, key)] = &stickyEntry{Member: member, Expires: now.Add(ttl)}
+	if now.Sub(r.stickySweep) > ttl || len(r.sticky) > 4096 {
+		r.stickySweep = now
+		for k, e := range r.sticky {
+			if !e.Expires.After(now) {
+				delete(r.sticky, k)
+			}
+		}
+	}
 }
 
 // recordTokens adds one response's token usage to both the called group and the

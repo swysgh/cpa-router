@@ -56,6 +56,12 @@ func (p *plugin) executeStream(raw []byte) ([]byte, error) {
 // follows runs in a goroutine after this returns, so recording there would race
 // with the caller reading the trace.
 func (p *plugin) executeStreamTraced(raw []byte, trace *[]attemptTrace) ([]byte, error) {
+	return p.executeStreamWithSticky(raw, trace, true)
+}
+
+// executeStreamWithSticky is the real implementation. allowSticky is false for
+// the management /test endpoint (see executeWithSticky).
+func (p *plugin) executeStreamWithSticky(raw []byte, trace *[]attemptTrace, allowSticky bool) ([]byte, error) {
 	var req rpcExecutorRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
@@ -76,7 +82,11 @@ func (p *plugin) executeStreamTraced(raw []byte, trace *[]attemptTrace) ([]byte,
 
 	p.rt.recordGroupAttempt(g.Name)
 
-	attempts, err := p.selectAttempts(g)
+	stickyKey := ""
+	if allowSticky {
+		stickyKey = p.stickyKey(&req)
+	}
+	attempts, err := p.selectAttempts(g, stickyKey)
 	if err != nil {
 		if pe, ok := err.(*pluginError); ok {
 			return pluginabi.NewErrorEnvelope(pe.code, pe.message, pe.httpStatus)
