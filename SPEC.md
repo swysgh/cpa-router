@@ -207,6 +207,8 @@ groups:
         enabled: true
       - group: "cheap"          # 嵌套另一个组
         enabled: true
+      - model: "q2api/cn/GLM-5.3"
+        weight: 3               # 仅 weighted-round-robin：该成员分到 3 份流量
 ```
 
 校验（失败 → 加载时记中文警告日志并保留上一份可用配置；管理 API 保存时返回 400 + 中文原因）：
@@ -217,7 +219,8 @@ groups:
 4. `aliases` 同样要过 2 的字符校验，且**不得与任何组名或其它组的别名冲突**。
 5. 每个成员必须**恰好**有 `model` 或 `group` 之一（不能都有、不能都没有），值非空且过字符校验。
 6. `group` 引用的组必须存在。
-7. **环检测**：DFS 检测 `group` 引用形成的环，发现环时报错并打印环路径，例如
+7. `weight` 可选，默认 1：必须为 1..1000 的整数；只能出现在 `weighted-round-robin` 组的成员上（写在 `fallback`/`round-robin` 组里直接报错，避免以为生效了）。
+8. **环检测**：DFS 检测 `group` 引用形成的环，发现环时报错并打印环路径，例如
    `组配置错误: 检测到循环嵌套: a -> b -> c -> a`。
 8. 运行时还要有深度上限 `max_nesting_depth`（**硬编码常量 8**，不放进配置），展开超过深度 → 该组本次请求返回错误。
 
@@ -271,13 +274,16 @@ expand(groupName, depth, visited, stickyKey):
   g = groups[groupName]
   if g == nil or !g.enabled -> 返回空
   eligible = [m for m in g.members if m.enabled and (m 是 model 时该模型不在冷却中)]
-  if strategy == "round-robin":
+  if strategy in ("round-robin", "weighted-round-robin"):
       start = -1
       if stickyKey != "" and sticky[key(group, stickyKey)] 命中且其成员仍在 eligible:
           start = 该成员在 eligible 的下标            # 命中即续期 sticky_ttl
       if start < 0:
-          start = pointer[groupName] % len(eligible)   # eligible 非空时
-          pointer[groupName] = start + 1
+          if strategy == "round-robin":
+              start = pointer[groupName] % len(eligible)   # eligible 非空时
+              pointer[groupName] = start + 1
+          else:
+              start = smoothStep(eligible.weights)         # nginx 平滑加权轮询
           if stickyKey != "": 记录 sticky[key(group, stickyKey)] = eligible[start] 的成员身份
       eligible = eligible[start:] + eligible[:start]
   # fallback: 保持声明顺序，pointer 与 sticky 都不参与
@@ -291,6 +297,7 @@ expand(groupName, depth, visited, stickyKey):
 要点：
 - **轮询指针按「组」维护，每次展开该组就前进 1**（`start+1`），所以每个请求都会换一个首选成员；同一个请求内部失败降级时仍按本次展开的顺序走。
 - **粘性会话（`sticky`）只作用于 `round-robin`**：会话键先按 `sticky_headers` 顺序取第一个非空请求头，取不到时（`sticky_body_fingerprint: true`）用请求体的对话根（instructions/system 前 50 字 + 首条 user 前 200 字）做 SHA-256 指纹。命中已有绑定就不再推进轮询指针；绑定成员进了冷却就自动重新绑定到本次选中的成员。绑定按「组 + 会话键」隔离，嵌套组各自维护，TTL 命中即续期。
+- **加权轮询（`weighted-round-robin`）**：用 nginx 的 **smooth weighted round-robin**——每次请求先给每个可用成员累加自己的 `weight`，取当前值最大者，再让胜出者减去本轮总权重。份额精确（1:2:3 在 6 的倍数次请求上正好是 1/6、2/6、3/6）且交错均匀，不会出现「高权重成员连打 N 次」。等权时输出与 `round-robin` **逐次一致**（声明顺序），所以 `weight` 全部省略等价于普通轮询。成员冷却/禁用会改变可用集合，此时调度状态按新长度重置（不做跨形状补偿）。
 - **管理端 `/test` 不参与粘性**：它用固定合成 body 发探测请求，若写入绑定会劫持真实会话。
 - **冷却中的成员在展开阶段就被摘掉**（这就是需求里的「移除 429 的请求」）。
 - 去重：同一个模型名在一次展开结果里只保留**第一次**出现（避免同一请求重复打同一个上游）。

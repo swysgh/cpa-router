@@ -496,5 +496,44 @@ await run("两行成员点第二行 ↑ -> 保存后 members 顺序反转", asyn
   ]);
 });
 
+await run("weighted-round-robin：weight 改动写进 POST body", async () => {
+  const g = {
+    name: "w", call_name: "w", strategy: "weighted-round-robin", enabled: true,
+    description: "", aliases: [],
+    members: [
+      { type: "model", name: "ink/glm-5.3", enabled: true, weight: 3 },
+      { type: "model", name: "xhx/sn-glm-5-3", enabled: true, weight: 1 },
+    ],
+  };
+  sandbox.openModal(g);
+  await flush();
+  const rows = memberRows();
+  if (rows.length !== 2) throw new Error("期望两行成员，实际 " + rows.length);
+  const w0 = rows[0].querySelector(".m-weight");
+  if (!w0) throw new Error("成员行没有 .m-weight 输入框");
+  if (String(w0.value) !== "3") throw new Error("回填 weight 失败: " + w0.value);
+  w0.value = "5";
+  await els.save.onclick();
+  await flush();
+  deepEq(lastGroupBody().group.members[0], { model: "ink/glm-5.3", enabled: true, weight: 5 });
+  // weight 1 是默认值，不应写进 body（否则每次保存都会重写 groups.yaml）
+  deepEq(lastGroupBody().group.members[1], { model: "xhx/sn-glm-5-3", enabled: true });
+});
+
+await run("非加权组：weight 输入框存在但不进 body", async () => {
+  const g = {
+    name: "p", call_name: "p", strategy: "round-robin", enabled: true,
+    description: "", aliases: [],
+    members: [{ type: "model", name: "ink/glm-5.3", enabled: true, weight: 4 }],
+  };
+  sandbox.openModal(g);
+  await flush();
+  const w0 = memberRows()[0].querySelector(".m-weight");
+  if (!w0) throw new Error("成员行没有 .m-weight 输入框");
+  await els.save.onclick();
+  await flush();
+  deepEq(lastGroupBody().group.members[0], { model: "ink/glm-5.3", enabled: true });
+});
+
 console.log(`PASS ${pass} / FAIL ${fail}`);
 process.exit(fail ? 1 : 0);

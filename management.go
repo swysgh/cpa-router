@@ -149,7 +149,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 	for _, g := range groups {
 		members := make([]map[string]any, 0, len(g.Members))
 		for _, m := range g.Members {
-			entry := map[string]any{"enabled": m.Enabled}
+			entry := map[string]any{"enabled": m.Enabled, "weight": m.Weight}
 			if m.IsModel {
 				entry["type"] = "model"
 				entry["name"] = m.Model
@@ -276,6 +276,7 @@ type jsonMember struct {
 	Model   string `json:"model"`
 	Group   string `json:"group"`
 	Enabled *bool  `json:"enabled"`
+	Weight  *int   `json:"weight,omitempty"`
 }
 
 type jsonGroup struct {
@@ -292,6 +293,7 @@ func (m jsonMember) toRaw() rawMember {
 		Model:      m.Model,
 		Group:      m.Group,
 		Enabled:    m.Enabled == nil || *m.Enabled,
+		Weight:     m.Weight,
 		enabledSet: true,
 	}
 }

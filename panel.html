@@ -210,6 +210,12 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .mrow .m-enabled { flex: 0 0 auto; }
+  /* Weight column: narrow, numeric; the row reads "name [w] [on] ↑ ↓ ✕". */
+  .mrow .m-weight {
+    flex: 0 0 3.6rem; width: 3.6rem; text-align: right;
+    font-size: .78rem; padding: .1rem .3rem;
+  }
+  .mrow .m-weight.off { opacity: .45; }
   .mrow .icon {
     display: inline-flex; align-items: center; justify-content: center;
     min-width: 24px; min-height: 24px; padding: 0 .3rem; line-height: 1;
@@ -392,7 +398,7 @@
         <div class="fld"><label for="f_name">name</label><input type="text" id="f_name"></div>
         <div class="fld"><label for="f_aliases">aliases</label><input type="text" id="f_aliases" placeholder="逗号分隔"></div>
         <div class="fld"><label for="f_strategy">strategy</label>
-          <select id="f_strategy"><option value="fallback">fallback</option><option value="round-robin">round-robin</option></select>
+          <select id="f_strategy"><option value="fallback">fallback</option><option value="round-robin">round-robin</option><option value="weighted-round-robin">weighted-round-robin</option></select>
         </div>
         <div class="fld"><label for="f_enabled">enabled</label><input type="checkbox" id="f_enabled" checked></div>
         <div class="fld fld-wide"><label for="f_desc">description</label><input type="text" id="f_desc"></div>
@@ -650,14 +656,17 @@ function groupCard(g, models){
 }
 function stratBadge(strategy){
   const b=document.createElement("span");
-  b.className="pill "+(strategy==="round-robin"?"rr":"fb");
-  b.textContent=strategy==="round-robin"?"轮询":"降级";
+  const rr=(strategy==="round-robin"||strategy==="weighted-round-robin");
+  b.className="pill "+(rr?"rr":"fb");
+  b.textContent=strategy==="weighted-round-robin"?"加权轮询":(strategy==="round-robin"?"轮询":"降级");
   return b;
 }
 function memberRowHTML(m, models){
   const isGroup=String(m.type||"")!=="model";
   const ms=(!isGroup&&models&&models[m.name])?models[m.name]:null;
   const badge=isGroup?'<span class="tbadge tg">组</span>':'<span class="tbadge tm">模型</span>';
+  const w=Number(n(m.weight))||1;
+  const wchip=w!==1?('<span class="pstat" title="加权轮询权重">w×'+w+'</span>'):'';
   let status=m.enabled?'<span class="ok">启用</span>':'<span class="sub">禁用</span>';
   if(ms&&Number(n(ms.cooldown_secs))>0)status+=' <span class="cool">冷却 '+n(ms.cooldown_secs)+'s</span>';
   // A group member has no per-model stats; show the referenced group's own
@@ -673,7 +682,7 @@ function memberRowHTML(m, models){
   const latency=(ms&&Number(n(ms.avg_latency_ms))>0)?('<span>'+n(ms.avg_latency_ms)+'ms</span>'):'';
   return '<div class="prow"><div class="p1">'+badge
     +'<span class="pname mono" title="'+esc(m.name)+'">'+esc(m.name)+'</span></div>'
-    +'<div class="p2"><span class="pstatus">'+status+'</span>'+stats+tok+latency+'</div></div>';
+    +'<div class="p2"><span class="pstatus">'+status+'</span>'+wchip+stats+tok+latency+'</div></div>';
 }
 // Cooling members, counted recursively: a member that is itself a group
 // contributes its own cooling members (visited set + depth cap guard against
@@ -810,7 +819,14 @@ function collectGroupPicks(groups, prefix){
   return [...new Set(out.filter(Boolean))].sort();
 }
 function memberTypeOf(name){ return GROUP_PICKS.includes(String(name||"").trim()) ? "group" : "model"; }
-function memberPayload(name, enabled){ return memberTypeOf(name)==="group" ? {group:name,enabled:enabled} : {model:name,enabled:enabled}; }
+function memberPayload(name, enabled, weight, strategy){
+  const base = memberTypeOf(name)==="group" ? {group:name,enabled:enabled} : {model:name,enabled:enabled};
+  const w = Number(weight);
+  // Weight only exists for weighted-round-robin, and 1 is the default: sending
+  // it everywhere would rewrite every groups.yaml entry on the next save.
+  if(strategy==="weighted-round-robin" && Number.isFinite(w) && w>1) base.weight=Math.trunc(w);
+  return base;
+}
 function refreshDatalists(){
   const hint=document.getElementById("pickHint");
   if(hint) hint.textContent = (MODEL_PICKS.length || GROUP_PICKS.length)
@@ -844,7 +860,7 @@ function openModal(g){
   document.getElementById("f_desc").value = g?g.description:"";
   document.getElementById("f_enabled").checked = g?g.enabled:true;
   const mc=document.getElementById("members"); mc.innerHTML="";
-  if(g&&g.members){g.members.forEach(m=>addMemberRow(m.name,m.enabled));}
+  if(g&&g.members){g.members.forEach(m=>addMemberRow(m.name,m.enabled,m.weight));}
   renumberRows();
   ensureModelNames();
   refreshDatalists();
@@ -871,7 +887,7 @@ function moveRow(row, delta){
   if(delta<0) mc.insertBefore(row, rows[j]); else mc.insertBefore(rows[j], row);
   renumberRows();
 }
-function addMemberRow(name, enabled){
+function addMemberRow(name, enabled, weight){
   const mc=document.getElementById("members");
   const r=document.createElement("div"); r.className="mrow";
   // The name lives on the row (data-name); save reads it from here.
@@ -897,6 +913,10 @@ function addMemberRow(name, enabled){
     kind.classList.toggle("group", isGroup);
   };
   sync();
+  const wt=document.createElement("input");
+  wt.type="number"; wt.className="m-weight"; wt.min="1"; wt.max="1000"; wt.step="1";
+  wt.value=String(Number(weight)||1); wt.title="权重（仅 weighted-round-robin 生效，1 = 均分）";
+  wt.oninput=()=>{ if(!(Number(wt.value)>=1)) wt.value="1"; };
   const en=document.createElement("input"); en.type="checkbox"; en.className="m-enabled"; en.checked=enabled!==false;
   const up=document.createElement("button"); up.type="button"; up.className="ghost icon up"; up.textContent="↑"; up.title="上移";
   up.onclick=()=>moveRow(r,-1);
@@ -914,7 +934,7 @@ function addMemberRow(name, enabled){
   };
   r.ondrop=e=>e.preventDefault();
   r.appendChild(handle); r.appendChild(idx); r.appendChild(kind); r.appendChild(nm);
-  r.appendChild(en); r.appendChild(up); r.appendChild(down); r.appendChild(del);
+  r.appendChild(wt); r.appendChild(en); r.appendChild(up); r.appendChild(down); r.appendChild(del);
   mc.appendChild(r);
   renumberRows();
 }
@@ -1070,6 +1090,7 @@ document.getElementById("save").onclick=async()=>{
   const name=document.getElementById("f_name").value.trim();
   if(!name){toast("name 不能为空",true);return;}
   const aliases=document.getElementById("f_aliases").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const strategy=document.getElementById("f_strategy").value;
   const members=[];
   // Read the name from the row's data-name (the row is [drag][idx][kind][name]…),
   // never by child index: the columns before the name are not inputs.
@@ -1077,9 +1098,10 @@ document.getElementById("save").onclick=async()=>{
     const val=String(r.dataset.name||"").trim();
     if(!val)return;
     const en=r.querySelector(".m-enabled").checked;
-    members.push(memberPayload(val,en));
+    const wEl=r.querySelector(".m-weight");
+    members.push(memberPayload(val,en,wEl?wEl.value:1,strategy));
   });
-  const group={name,strategy:document.getElementById("f_strategy").value,enabled:document.getElementById("f_enabled").checked,description:document.getElementById("f_desc").value,aliases,members};
+  const group={name,strategy,enabled:document.getElementById("f_enabled").checked,description:document.getElementById("f_desc").value,aliases,members};
   const oldLabel=saveBtn.textContent;
   saveBtn.disabled=true; saveBtn.textContent="保存中…";
   try{

@@ -59,6 +59,10 @@ type rawMember struct {
 	Model   string `yaml:"model"`
 	Group   string `yaml:"group"`
 	Enabled bool   `yaml:"enabled"`
+	// Weight is the member's share of round-robin traffic (1 = equal share).
+	// A pointer so an absent key and an explicit 0 stay distinguishable: 0 is
+	// invalid (a member that never gets picked must be disabled instead).
+	Weight *int `yaml:"weight,omitempty"`
 	// enabledSet tracks whether the YAML author explicitly set "enabled". When
 	// the field is absent we treat the member as enabled (opt-out semantics: a
 	// member is active unless explicitly disabled). This keeps state files
@@ -102,12 +106,24 @@ type group struct {
 	Members     []member
 }
 
+// rotates reports whether the group's order is chosen by a scheduler (as
+// opposed to declaration order).
+func (g group) rotates() bool {
+	return g.Strategy == "round-robin" || g.Strategy == "weighted-round-robin"
+}
+
+// weighted reports whether member weights drive the scheduler.
+func (g group) weighted() bool { return g.Strategy == "weighted-round-robin" }
+
 // member is a validated member reference.
 type member struct {
 	IsModel bool   // true => Model set, false => Group set
 	Model   string // real model name
 	Group   string // referenced group name
 	Enabled bool
+	// Weight is the validated, resolved weight (>= 1). Absent in the state
+	// file resolves to 1, which reproduces plain rotation exactly.
+	Weight int
 }
 
 // groupFile is the top-level state file structure.
@@ -154,8 +170,8 @@ func parseGroups(f groupFile, prefix ...string) ([]group, map[string]string, err
 		if strategy == "" {
 			strategy = "fallback"
 		}
-		if strategy != "round-robin" && strategy != "fallback" {
-			return nil, nil, fmt.Errorf("组配置错误: 组 %s 的 strategy 必须是 round-robin|fallback", name)
+		if strategy != "round-robin" && strategy != "weighted-round-robin" && strategy != "fallback" {
+			return nil, nil, fmt.Errorf("组配置错误: 组 %s 的 strategy 必须是 round-robin|weighted-round-robin|fallback", name)
 		}
 
 		// Validate aliases.
@@ -188,6 +204,9 @@ func parseGroups(f groupFile, prefix ...string) ([]group, map[string]string, err
 				return nil, nil, fmt.Errorf("组配置错误: 组 %s 第 %d 个成员必须指定 model 或 group 之一", name, i+1)
 			}
 			en := memberEnabled(m)
+			for _, werr := range validateMemberWeight(name, i+1, m.Weight, strategy) {
+				return nil, nil, werr
+			}
 			if strings.TrimSpace(m.Model) != "" {
 				mm := strings.TrimSpace(m.Model)
 				if !nameRegex.MatchString(mm) {
@@ -245,10 +264,11 @@ func parseGroups(f groupFile, prefix ...string) ([]group, map[string]string, err
 		}
 		for _, m := range rg.Members {
 			en := memberEnabled(m)
+			w := memberWeight(m.Weight)
 			if strings.TrimSpace(m.Model) != "" {
-				g.Members = append(g.Members, member{IsModel: true, Model: strings.TrimSpace(m.Model), Enabled: en})
+				g.Members = append(g.Members, member{IsModel: true, Model: strings.TrimSpace(m.Model), Enabled: en, Weight: w})
 			} else {
-				g.Members = append(g.Members, member{IsModel: false, Group: strings.TrimSpace(m.Group), Enabled: en})
+				g.Members = append(g.Members, member{IsModel: false, Group: strings.TrimSpace(m.Group), Enabled: en, Weight: w})
 			}
 		}
 		out = append(out, g)
@@ -256,6 +276,39 @@ func parseGroups(f groupFile, prefix ...string) ([]group, map[string]string, err
 
 	// Build call-name index (name_prefix applied by caller via resolveNames).
 	return out, aliasToName, nil
+}
+
+// maxMemberWeight caps a single member's weight so a typo (weight: 100000) cannot
+// make the smooth-weighted scheduler take forever to converge.
+const maxMemberWeight = 1000
+
+// memberWeight resolves the effective weight: absent = 1.
+func memberWeight(w *int) int {
+	if w == nil {
+		return 1
+	}
+	return *w
+}
+
+// validateMemberWeight rejects weights that cannot be honoured. Declaring a
+// weight on a fallback group is an error on purpose: fallback is ordered by
+// declaration, so a weight there would be silently ignored.
+func validateMemberWeight(groupName string, idx int, w *int, strategy string) []error {
+	if w != nil {
+		if *w < 1 {
+			return []error{fmt.Errorf("组配置错误: 组 %s 第 %d 个成员的 weight 必须 >= 1", groupName, idx)}
+		}
+		if *w > maxMemberWeight {
+			return []error{fmt.Errorf("组配置错误: 组 %s 第 %d 个成员的 weight 不能超过 %d", groupName, idx, maxMemberWeight)}
+		}
+		if strategy == "fallback" {
+			return []error{fmt.Errorf("组配置错误: 组 %s 第 %d 个成员设置了 weight，但 fallback 组按声明顺序尝试，weight 无效", groupName, idx)}
+		}
+		if strategy == "round-robin" {
+			return []error{fmt.Errorf("组配置错误: 组 %s 第 %d 个成员设置了 weight，请把 strategy 改成 weighted-round-robin", groupName, idx)}
+		}
+	}
+	return nil
 }
 
 // memberEnabled resolves the effective enabled state of a rawMember. A member is

@@ -97,12 +97,14 @@ func (p *plugin) expand(groupName string, depth int, visited map[string]bool, op
 		eligible = append(eligible, m)
 	}
 
-	if g.Strategy == "round-robin" && len(eligible) > 0 {
+	if g.rotates() && len(eligible) > 0 {
 		ids := make([]string, len(eligible))
+		w := make([]int, len(eligible))
 		for i, m := range eligible {
 			ids[i] = memberIdentity(m)
+			w[i] = m.Weight
 		}
-		start := p.rt.stickyStart(g.Name, stickyKey, ids, p.conf().StickyTTLDur, !opt.peek)
+		start := p.rt.pickStart(g.Name, g.weighted(), ids, w, stickyKey, p.conf().StickyTTLDur, !opt.peek)
 		eligible = append(append([]member{}, eligible[start:]...), eligible[:start]...)
 	}
 

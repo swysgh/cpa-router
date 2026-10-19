@@ -56,6 +56,11 @@ type runtimeState struct {
 	sticky      map[string]*stickyEntry
 	stickySweep time.Time
 
+	// weights holds the smooth-weighted-round-robin current weights, keyed by
+	// group name and indexed like the last eligible member list. A group using
+	// plain round-robin or fallback never touches it.
+	weights map[string][]int
+
 	// tokenUpdates counts recorded usage reports; it lets the periodic writer
 	// skip a flush when nothing changed.
 	tokenUpdates int64
@@ -73,6 +78,7 @@ func newRuntimeState() *runtimeState {
 		groupTokens: make(map[string]*tokenStat),
 		pointers:    make(map[string]int),
 		sticky:      make(map[string]*stickyEntry),
+		weights:     make(map[string][]int),
 		nowFunc:     time.Now,
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
@@ -253,22 +259,28 @@ func (r *runtimeState) groupStat(name string) *groupStat {
 	return g
 }
 
-// stickyStart picks the round-robin start index for one request in a single
-// critical section: look up the session pin, and when there is none advance the
-// per-group pointer and record the new pin. Doing all three under one lock keeps
-// two simultaneous first requests of the same session from advancing the
-// pointer twice and pinning two different members.
+// pickStart chooses the start index for one request in a single critical
+// section: consult the session pin, then the group's scheduler. Doing the pin
+// lookup, the scheduler step, and the pin write under one lock keeps two
+// simultaneous first requests of the same session from each taking a scheduler
+// step and pinning different members.
 //
 // identities are the eligible members in declaration order (memberIdentity
-// strings). key == "" means plain rotation with no pinning. advance=false is the
-// management-probe path: report the ordering the next real request would see
-// without moving the pointer or touching any pin.
-func (r *runtimeState) stickyStart(group, key string, identities []string, ttl time.Duration, advance bool) int {
+// strings); weights are their resolved shares (nil or all-equal means plain
+// rotation, which reproduces the pre-weight behaviour exactly). key == "" means
+// no pinning. advance=false is the management-probe path: report the ordering
+// the next real request would see without consuming a scheduling step or
+// touching any pin.
+func (r *runtimeState) pickStart(group string, weighted bool, identities []string, weights []int, key string, ttl time.Duration, advance bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.clock()
+
 	if !advance {
-		return r.pointers[group] % len(identities)
+		if !weighted {
+			return r.pointers[group] % len(identities)
+		}
+		return peekSmoothIndex(r.weights[group], weights)
 	}
 
 	mk := ""
@@ -289,8 +301,14 @@ func (r *runtimeState) stickyStart(group, key string, identities []string, ttl t
 		}
 	}
 
-	start := r.pointers[group] % len(identities)
-	r.pointers[group] = r.pointers[group] + 1
+	var start int
+	if weighted {
+		start, r.weights[group] = smoothStep(r.weights[group], weights)
+	} else {
+		start = r.pointers[group] % len(identities)
+		r.pointers[group] = r.pointers[group] + 1
+	}
+
 	if mk != "" {
 		r.sticky[mk] = &stickyEntry{Member: identities[start], Expires: now.Add(ttl)}
 		if now.Sub(r.stickySweep) > ttl || len(r.sticky) > 4096 {
@@ -303,6 +321,46 @@ func (r *runtimeState) stickyStart(group, key string, identities []string, ttl t
 		}
 	}
 	return start
+}
+
+// smoothStep advances the smooth weighted round-robin state (nginx's algorithm)
+// by one request and returns the winning index. Every member gains its own
+// weight, the winner pays the total, so each member's share comes out exact and
+// the picks stay evenly interleaved instead of arriving in bursts.
+//
+// current is treated as reset when its length differs from weights, which
+// happens whenever the eligible set changes (a member cools down, is disabled,
+// or the group is edited).
+//
+// Equal weights reproduce plain rotation in declaration order, which is what
+// makes weighted output a strict superset of the unweighted behaviour.
+func smoothStep(current, weights []int) (int, []int) {
+	cur := make([]int, len(weights))
+	if len(current) == len(weights) {
+		copy(cur, current)
+	}
+	total := 0
+	best := 0
+	for i, w := range weights {
+		if w < 1 {
+			w = 1
+		}
+		cur[i] += w
+		total += w
+		if cur[i] > cur[best] {
+			best = i
+		}
+	}
+	cur[best] -= total
+	return best, cur
+}
+
+// peekSmoothIndex reports the index smoothStep would pick next without
+// committing the step. Management probes use it so a panel click does not
+// consume a real request's turn.
+func peekSmoothIndex(current, weights []int) int {
+	best, _ := smoothStep(current, weights)
+	return best
 }
 
 // stickyMapKey scopes one session key to one group: two groups called from the
