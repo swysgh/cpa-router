@@ -55,7 +55,7 @@ func TestExecutorFallbackOn429(t *testing.T) {
 	clock := time.Unix(1000, 0)
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	p.rt.setClock(func() time.Time { return clock })
 
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
@@ -100,7 +100,7 @@ func TestExecutorFallbackOn429(t *testing.T) {
 func TestExecutorAll429(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Enabled: true, Members: []rawMember{
 			{Model: "m1", Enabled: true}, {Model: "m2", Enabled: true},
@@ -125,7 +125,7 @@ func newTracePlugin(t *testing.T, members ...string) (*plugin, *fakeHost) {
 	t.Helper()
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	raw := make([]rawMember, 0, len(members))
 	for _, m := range members {
 		raw = append(raw, rawMember{Model: m, Enabled: true})
@@ -214,9 +214,11 @@ func TestExecuteTracesNothingWhenGroupExhausted(t *testing.T) {
 	p, h := newTracePlugin(t, "m1", "m2")
 	_ = h
 	// Cool both members down first.
-	p.rt.recordCooldown("m1", 429, "rl", p.cfg)
-	p.rt.recordCooldown("m2", 429, "rl", p.cfg)
-	p.cfg.AllCoolingPolicy = "error"
+	p.rt.recordCooldown("m1", 429, "rl", *p.conf())
+	p.rt.recordCooldown("m2", 429, "rl", *p.conf())
+	_cfg := *p.conf()
+	_cfg.AllCoolingPolicy = "error"
+	p.setConfig(_cfg)
 
 	var trace []attemptTrace
 	raw, err := p.executeTraced(execReq("g", []byte(`{}`)), &trace)
@@ -231,7 +233,7 @@ func TestExecuteTracesNothingWhenGroupExhausted(t *testing.T) {
 func TestExecutorModelRewrite(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Enabled: true, Members: []rawMember{{Model: "real-model", Enabled: true}}},
 	}})
@@ -283,7 +285,7 @@ func decodeStreamResponse(t *testing.T, raw []byte) (map[string]any, int) {
 func TestStreamPreflightDegrade(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Enabled: true, Members: []rawMember{
 			{Model: "m1", Enabled: true}, {Model: "m2", Enabled: true},
@@ -337,7 +339,7 @@ func TestStreamPreflightDegrade(t *testing.T) {
 func TestStreamPreflightAllFail(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
 	}})
@@ -365,7 +367,7 @@ func TestStreamPreflightAllFail(t *testing.T) {
 func TestStreamDegradeAfterError(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Enabled: true, Members: []rawMember{
 			{Model: "m1", Enabled: true}, {Model: "m2", Enabled: true},
@@ -414,7 +416,7 @@ func TestStreamDegradeAfterError(t *testing.T) {
 func TestStreamNoDegradeAfterPayload(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Enabled: true, Members: []rawMember{{Model: "m1", Enabled: true}}},
 	}})

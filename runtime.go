@@ -260,11 +260,16 @@ func (r *runtimeState) groupStat(name string) *groupStat {
 // pointer twice and pinning two different members.
 //
 // identities are the eligible members in declaration order (memberIdentity
-// strings). key == "" means plain rotation with no pinning.
-func (r *runtimeState) stickyStart(group, key string, identities []string, ttl time.Duration) int {
+// strings). key == "" means plain rotation with no pinning. advance=false is the
+// management-probe path: report the ordering the next real request would see
+// without moving the pointer or touching any pin.
+func (r *runtimeState) stickyStart(group, key string, identities []string, ttl time.Duration, advance bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.clock()
+	if !advance {
+		return r.pointers[group] % len(identities)
+	}
 
 	mk := ""
 	if key != "" && ttl > 0 {

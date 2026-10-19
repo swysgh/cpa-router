@@ -12,7 +12,7 @@ import (
 func newTestPlugin(t *testing.T, groups groupFile, cfg config) *plugin {
 	t.Helper()
 	p := newPlugin(newFakeHost())
-	p.cfg = cfg
+	p.setConfig(cfg)
 	p.rt.setClock(fixedClock(time.Unix(1000, 0)))
 	parsed, _, err := parseGroups(groups)
 	if err != nil {

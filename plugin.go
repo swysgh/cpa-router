@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -33,7 +34,7 @@ type plugin struct {
 	host hostCaller
 
 	mu        sync.RWMutex
-	cfg       config
+	cfg       atomic.Pointer[config]
 	groups    []group
 	nameIndex map[string]string
 	store     *groupStore
@@ -61,15 +62,30 @@ type plugin struct {
 
 // newPlugin constructs a plugin with the given host caller and default config.
 func newPlugin(host hostCaller) *plugin {
+	cfg := defaultConfig()
 	p := &plugin{
 		host:      host,
-		cfg:       defaultConfig(),
 		rt:        newRuntimeState(),
 		log:       &logger{host: host, level: "info"},
 		nameIndex: map[string]string{},
 	}
+	p.cfg.Store(&cfg)
 	return p
 }
+
+// conf returns the current configuration snapshot. reconfigure swaps the whole
+// struct through an atomic pointer so the request path never reads a config that
+// is being written (the previous plain field raced with configure under -race).
+func (p *plugin) conf() *config {
+	if c := p.cfg.Load(); c != nil {
+		return c
+	}
+	d := defaultConfig()
+	return &d
+}
+
+// setConfig replaces the configuration snapshot (tests and reconfigure).
+func (p *plugin) setConfig(c config) { p.cfg.Store(&c) }
 
 // logger filters by level and forwards to host.log.
 type logger struct {
@@ -131,7 +147,7 @@ func (p *plugin) configure(raw []byte) error {
 	reloadStats := false
 
 	p.mu.Lock()
-	p.cfg = cfg
+	p.cfg.Store(&cfg)
 	p.log.level = cfg.LogLevel
 	if cfg.StateFile != "" {
 		p.store = newGroupStore(cfg.StateFile)
@@ -194,7 +210,7 @@ func (p *plugin) configure(raw []byte) error {
 	// slice on another goroutine.
 	p.mu.RLock()
 	absPath := p.statePath
-	cfgCopy := p.cfg
+	cfgCopy := *p.conf()
 	groupCount := len(p.groups)
 	p.mu.RUnlock()
 	cfgYAML, _ := yaml.Marshal(cfgCopy)
@@ -229,13 +245,13 @@ func (p *plugin) reloadGroups() {
 		p.mu.Unlock()
 		return
 	}
-	f, notes := normalizeGroupRefs(f, p.cfg.NamePrefix)
+	f, notes := normalizeGroupRefs(f, p.conf().NamePrefix)
 	if len(notes) > 0 {
 		p.log.info("组成员引用已归一化", map[string]any{"notes": notes})
 	}
-	groups, _, err := parseGroups(f, p.cfg.NamePrefix)
+	groups, _, err := parseGroups(f, p.conf().NamePrefix)
 	if err == nil {
-		err = validateModelMembers(groups, p.cfg.NamePrefix)
+		err = validateModelMembers(groups, p.conf().NamePrefix)
 	}
 	if err != nil {
 		p.log.warn("组配置校验失败，保留上一份配置", map[string]any{"error": err.Error()})
@@ -244,7 +260,7 @@ func (p *plugin) reloadGroups() {
 		p.mu.Unlock()
 		return
 	}
-	nameIdx := buildGroupNameIndex(groups, p.cfg.NamePrefix)
+	nameIdx := buildGroupNameIndex(groups, p.conf().NamePrefix)
 	// Same ordering as a management save, so /state and the panel do not flip
 	// between file order and sorted order across a reload. Sort before the swap:
 	// readers copy p.groups under RLock only.
@@ -261,7 +277,7 @@ func (p *plugin) reloadGroups() {
 // reloadIfNeeded performs throttled mtime-based hot reload.
 func (p *plugin) reloadIfNeeded() {
 	p.mu.RLock()
-	interval := p.cfg.ReloadIntervalDur
+	interval := p.conf().ReloadIntervalDur
 	store := p.store
 	last := p.lastReload
 	p.mu.RUnlock()
@@ -380,7 +396,7 @@ func (p *plugin) registrationJSON() registration {
 
 // pluginVersion is the single source of truth for the version reported to the
 // host (registration) and to the panel (/state).
-const pluginVersion = "0.9.2"
+const pluginVersion = "0.9.3"
 
 // modelProviderName is the provider key the plugin registers its models under.
 const modelProviderName = "cpa-router"
@@ -395,7 +411,7 @@ var modelCreatedAt = time.Now().Unix()
 // never see them, because the host only learns about plugin-provided models via
 // model.register. Disabled groups are not advertised.
 func (p *plugin) modelRegistrationJSON() pluginapi.ModelRegistrationResponse {
-	prefix := p.cfg.NamePrefix
+	prefix := p.conf().NamePrefix
 	seen := make(map[string]bool)
 	models := make([]pluginapi.ModelInfo, 0, 8)
 	for _, g := range p.allGroupsSnapshot() {

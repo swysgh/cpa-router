@@ -66,7 +66,7 @@ groups:
 
 	// 该组必须能被路由命中（而不是因为零值被静默跳过）。
 	p := newPlugin(newFakeHost())
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	p.groups = groups
 	p.nameIndex = buildGroupNameIndex(groups, "")
 	routeRaw, _ := json.Marshal(pluginapi.ModelRouteRequest{RequestedModel: "compact", SourceFormat: "openai"})
@@ -93,7 +93,7 @@ groups:
 func TestReviewDegradeForwardsOriginalRequest(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 
 	groups, _, err := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "g", Strategy: "fallback", Enabled: true, Members: []rawMember{

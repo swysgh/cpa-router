@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +20,7 @@ func stickyCfg() config {
 
 func expandFirst(t *testing.T, p *plugin, key string) string {
 	t.Helper()
-	out, err := p.expand("g", 1, map[string]bool{}, false, key)
+	out, err := p.expand("g", 1, map[string]bool{}, expandOpts{stickyKey: key})
 	if err != nil {
 		t.Fatalf("expand: %v", err)
 	}
@@ -85,7 +87,7 @@ func TestStickyReassignsWhenPinnedMemberCools(t *testing.T) {
 	if got := expandFirst(t, p, "h:sess"); got != "m1" {
 		t.Fatalf("first pick = %s, want m1", got)
 	}
-	p.rt.recordCooldown("m1", 429, "", p.cfg)
+	p.rt.recordCooldown("m1", 429, "", *p.conf())
 
 	got := expandFirst(t, p, "h:sess")
 	if got == "m1" {
@@ -111,7 +113,7 @@ func TestStickyKeysAreScopedPerGroup(t *testing.T) {
 	if got := expandFirst(t, p, "h:same"); got != "m1" {
 		t.Fatalf("g first pick = %s, want m1", got)
 	}
-	out, err := p.expand("h", 1, map[string]bool{}, false, "h:same")
+	out, err := p.expand("h", 1, map[string]bool{}, expandOpts{stickyKey: "h:same"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +223,7 @@ func TestStickyOnlyAppliesToRoundRobin(t *testing.T) {
 		}},
 	}}, stickyCfg())
 	for i := 0; i < 3; i++ {
-		out, err := p.expand("g", 1, map[string]bool{}, false, "h:sess")
+		out, err := p.expand("g", 1, map[string]bool{}, expandOpts{stickyKey: "h:sess"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -235,6 +237,9 @@ func TestStickyOnlyAppliesToRoundRobin(t *testing.T) {
 // synthetic body is constant, so a pin written there would hijack real traffic.
 func TestTestEndpointDoesNotCreatePins(t *testing.T) {
 	p := newTestPlugin(t, groups3RoundRobin(), stickyCfg())
+	p.host.(*fakeHost).setHandler(pluginabi.MethodHostModelExecute, func(payload json.RawMessage) (json.RawMessage, error) {
+		return hostExecuteResult(200, []byte(`{"ok":true}`), nil), nil
+	})
 	req := rpcExecutorRequest{}
 	req.Model = "g"
 	req.OriginalRequest = []byte(`{"model":"g","messages":[{"role":"user","content":"probe"}]}`)
@@ -305,7 +310,7 @@ func TestStickyConcurrentSessionsStayConsistent(t *testing.T) {
 			if i%2 == 1 {
 				key = "h:unique-" + strconv.Itoa(i)
 			}
-			out, err := p.expand("g", 1, map[string]bool{}, false, key)
+			out, err := p.expand("g", 1, map[string]bool{}, expandOpts{stickyKey: key})
 			if err != nil {
 				results <- "err:" + err.Error()
 				return
@@ -336,12 +341,12 @@ func TestStickyPropagatesIntoNestedRoundRobinGroup(t *testing.T) {
 		}},
 	}}, stickyCfg())
 
-	first, err := p.expand("outer", 1, map[string]bool{}, false, "h:sess")
+	first, err := p.expand("outer", 1, map[string]bool{}, expandOpts{stickyKey: "h:sess"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		got, err := p.expand("outer", 1, map[string]bool{}, false, "h:sess")
+		got, err := p.expand("outer", 1, map[string]bool{}, expandOpts{stickyKey: "h:sess"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -360,10 +365,10 @@ func TestStickyAllCoolingFirstPinsServedMember(t *testing.T) {
 		}},
 	}}, cfg)
 
-	p.rt.recordCooldown("m1", 429, "", p.cfg) // cools first
-	p.rt.recordCooldown("m2", 429, "", p.cfg)
+	p.rt.recordCooldown("m1", 429, "", *p.conf()) // cools first
+	p.rt.recordCooldown("m2", 429, "", *p.conf())
 
-	attempts, err := p.selectAttempts(p.mustGroup("g"), "h:sess")
+	attempts, err := p.selectAttempts(p.mustGroup("g"), selectOpts{stickyKey: "h:sess"})
 	if err != nil {
 		t.Fatalf("selectAttempts: %v", err)
 	}
@@ -387,5 +392,59 @@ func TestBodyFingerprintReadsResponsesInstructions(t *testing.T) {
 	}
 	if bodyFingerprint(a) == bodyFingerprint(c) {
 		t.Fatal("different instructions hashed the same")
+	}
+}
+
+// TestTestEndpointDoesNotAdvancePointer guards the shared rotation state: the
+// panel's 测试 button fires real probes, and those must not shift which member
+// the next real request starts from.
+func TestTestEndpointDoesNotAdvancePointer(t *testing.T) {
+	p := newTestPlugin(t, groups3RoundRobin(), stickyCfg())
+	p.host.(*fakeHost).setHandler(pluginabi.MethodHostModelExecute, func(payload json.RawMessage) (json.RawMessage, error) {
+		return hostExecuteResult(200, []byte(`{"ok":true}`), nil), nil
+	})
+	req := rpcExecutorRequest{}
+	req.Model = "g"
+	req.OriginalRequest = []byte(`{"model":"g","messages":[{"role":"user","content":"probe"}]}`)
+	raw, _ := json.Marshal(req)
+
+	for i := 0; i < 3; i++ {
+		if _, err := p.executeWithSticky(raw, nil, false); err != nil {
+			t.Fatalf("probe %d: %v", i, err)
+		}
+	}
+	p.rt.mu.Lock()
+	ptr := p.rt.pointers["g"]
+	pins := len(p.rt.sticky)
+	p.rt.mu.Unlock()
+	if ptr != 0 {
+		t.Fatalf("round-robin pointer = %d after 3 probes, want 0", ptr)
+	}
+	if pins != 0 {
+		t.Fatalf("probes wrote %d pin(s), want 0", pins)
+	}
+	if got := expandFirst(t, p, "h:real"); got != "m1" {
+		t.Fatalf("first real request hit %s, want m1 (probes moved the rotation)", got)
+	}
+}
+
+func TestPeekExpansionKeepsPointer(t *testing.T) {
+	p := newTestPlugin(t, groups3RoundRobin(), stickyCfg())
+	first, err := p.expand("g", 1, map[string]bool{}, expandOpts{peek: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.expand("g", 1, map[string]bool{}, expandOpts{peek: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first[0] != second[0] {
+		t.Fatalf("peek expanded differently: %s then %s", first[0], second[0])
+	}
+	p.rt.mu.Lock()
+	ptr := p.rt.pointers["g"]
+	p.rt.mu.Unlock()
+	if ptr != 0 {
+		t.Fatalf("peek advanced the pointer to %d", ptr)
 	}
 }

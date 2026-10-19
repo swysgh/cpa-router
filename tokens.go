@@ -320,7 +320,7 @@ func (p *plugin) flushTokenStats() error {
 // elapsed and something changed since the last write.
 func (p *plugin) flushTokenStatsIfDue() {
 	p.mu.RLock()
-	store, interval := p.statsStore, p.cfg.StatsFlushIntervalDur
+	store, interval := p.statsStore, p.conf().StatsFlushIntervalDur
 	p.mu.RUnlock()
 	if store == nil || interval <= 0 {
 		return

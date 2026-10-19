@@ -57,17 +57,24 @@ func recordAttemptTrace(trace *[]attemptTrace, t attemptTrace) {
 // at expansion time. visited tracks the group path for cycle safety (double
 // guard beyond load-time detection).
 //
-// stickyKey pins a round-robin group's start member to one session; an empty
-// key means plain rotation. It is propagated into nested groups so every level
-// honours the same session.
-func (p *plugin) expand(groupName string, depth int, visited map[string]bool, ignoreCooldown bool, stickyKey string) ([]string, error) {
+// expandOpts controls one expansion. stickyKey pins a round-robin group's start
+// member to one session (empty = plain rotation) and is propagated into nested
+// groups; peek leaves the round-robin pointer untouched for management probes.
+type expandOpts struct {
+	ignoreCooldown bool
+	stickyKey      string
+	peek           bool
+}
+
+func (p *plugin) expand(groupName string, depth int, visited map[string]bool, opt expandOpts) ([]string, error) {
+	ignoreCooldown, stickyKey := opt.ignoreCooldown, opt.stickyKey
 	if depth > maxNestingDepth {
 		return nil, fmt.Errorf("嵌套层数超过 %d", maxNestingDepth)
 	}
 	// The caller derives keys only when sticky is on; re-checking here keeps the
 	// selection algorithm safe for any caller (tests, future call sites) and
 	// stops nested groups from pinning when the feature is off.
-	if !p.cfg.Sticky {
+	if !p.conf().Sticky {
 		stickyKey = ""
 	}
 	if visited[groupName] {
@@ -95,7 +102,7 @@ func (p *plugin) expand(groupName string, depth int, visited map[string]bool, ig
 		for i, m := range eligible {
 			ids[i] = memberIdentity(m)
 		}
-		start := p.rt.stickyStart(g.Name, stickyKey, ids, p.cfg.StickyTTLDur)
+		start := p.rt.stickyStart(g.Name, stickyKey, ids, p.conf().StickyTTLDur, !opt.peek)
 		eligible = append(append([]member{}, eligible[start:]...), eligible[:start]...)
 	}
 
@@ -109,7 +116,7 @@ func (p *plugin) expand(groupName string, depth int, visited map[string]bool, ig
 		if m.IsModel {
 			models = []string{m.Model}
 		} else {
-			inner, err := p.expand(m.Group, depth+1, visited, ignoreCooldown, stickyKey)
+			inner, err := p.expand(m.Group, depth+1, visited, opt)
 			if err != nil {
 				return nil, err
 			}
@@ -125,8 +132,8 @@ func (p *plugin) expand(groupName string, depth int, visited map[string]bool, ig
 	}
 
 	// Enforce max_attempts truncation.
-	if p.cfg.MaxAttempts > 0 && len(out) > p.cfg.MaxAttempts {
-		out = out[:p.cfg.MaxAttempts]
+	if p.conf().MaxAttempts > 0 && len(out) > p.conf().MaxAttempts {
+		out = out[:p.conf().MaxAttempts]
 	}
 	return out, nil
 }
@@ -141,10 +148,18 @@ func memberIdentity(m member) string {
 	return "group:" + m.Group
 }
 
+// selectOpts carries the per-request selection knobs: the sticky session key and
+// whether the caller may move the round-robin pointer (management probes may not).
+type selectOpts struct {
+	stickyKey string
+	peek      bool
+}
+
 // selectAttempts produces the ordered attempt list, applying the
 // all_cooling_policy when the normal expansion is empty (§7.4).
-func (p *plugin) selectAttempts(g *group, stickyKey string) ([]string, error) {
-	attempts, err := p.expand(g.Name, 1, map[string]bool{}, false, stickyKey)
+func (p *plugin) selectAttempts(g *group, opt selectOpts) ([]string, error) {
+	stickyKey := opt.stickyKey
+	attempts, err := p.expand(g.Name, 1, map[string]bool{}, expandOpts{stickyKey: stickyKey, peek: opt.peek})
 	if err != nil {
 		return nil, err
 	}
@@ -152,11 +167,11 @@ func (p *plugin) selectAttempts(g *group, stickyKey string) ([]string, error) {
 		return attempts, nil
 	}
 
-	switch p.cfg.AllCoolingPolicy {
+	switch p.conf().AllCoolingPolicy {
 	case "error":
 		return nil, p.exhaustedError(g, nil)
 	case "first":
-		ignored, ierr := p.expand(g.Name, 1, map[string]bool{}, true, stickyKey)
+		ignored, ierr := p.expand(g.Name, 1, map[string]bool{}, expandOpts{ignoreCooldown: true, stickyKey: stickyKey, peek: opt.peek})
 		if ierr != nil {
 			return nil, ierr
 		}
@@ -175,13 +190,15 @@ func (p *plugin) selectAttempts(g *group, stickyKey string) ([]string, error) {
 		}
 		// ignored-expand pins the member the rotation pointed at, which is not
 		// the member about to serve. Pin what actually serves instead.
-		p.rt.stickyAssign(g.Name, stickyKey, pick, p.cfg.StickyTTLDur)
+		if !opt.peek {
+			p.rt.stickyAssign(g.Name, stickyKey, pick, p.conf().StickyTTLDur)
+		}
 		return []string{pick}, nil
 	case "wait":
 		fallthrough
 	default:
 		// Wait until the earliest cooling member expires (bounded by max_wait).
-		all, aerr := p.expand(g.Name, 1, map[string]bool{}, true, stickyKey)
+		all, aerr := p.expand(g.Name, 1, map[string]bool{}, expandOpts{ignoreCooldown: true, stickyKey: stickyKey, peek: opt.peek})
 		if aerr != nil {
 			return nil, aerr
 		}
@@ -190,13 +207,13 @@ func (p *plugin) selectAttempts(g *group, stickyKey string) ([]string, error) {
 			return nil, p.exhaustedError(g, nil)
 		}
 		wait := p.rt.coolingInfo(earliest).Until.Sub(p.rt.now())
-		if wait > p.cfg.MaxWaitDur {
-			wait = p.cfg.MaxWaitDur
+		if wait > p.conf().MaxWaitDur {
+			wait = p.conf().MaxWaitDur
 		}
 		if wait > 0 {
 			time.Sleep(wait)
 		}
-		attempts, err = p.expand(g.Name, 1, map[string]bool{}, false, stickyKey)
+		attempts, err = p.expand(g.Name, 1, map[string]bool{}, expandOpts{stickyKey: stickyKey, peek: opt.peek})
 		if err != nil {
 			return nil, err
 		}
@@ -210,7 +227,7 @@ func (p *plugin) selectAttempts(g *group, stickyKey string) ([]string, error) {
 // exhaustedError builds the group_exhausted envelope (http 429) with the
 // earliest-recovery hint.
 func (p *plugin) exhaustedError(g *group, last map[string]struct{}) error {
-	all, _ := p.expand(g.Name, 1, map[string]bool{}, true, "")
+	all, _ := p.expand(g.Name, 1, map[string]bool{}, expandOpts{ignoreCooldown: true, peek: true})
 	earliest := p.rt.earliestCooling(all)
 	msg := fmt.Sprintf("组 %s 的成员全部处于冷却中", g.Name)
 	if earliest != "" {
@@ -315,7 +332,7 @@ func (p *plugin) executeWithSticky(raw []byte, trace *[]attemptTrace, allowStick
 	if allowSticky {
 		stickyKey = p.stickyKey(&req)
 	}
-	attempts, err := p.selectAttempts(g, stickyKey)
+	attempts, err := p.selectAttempts(g, selectOpts{stickyKey: stickyKey, peek: !allowSticky})
 	if err != nil {
 		if pe, ok := err.(*pluginError); ok {
 			return pluginabi.NewErrorEnvelope(pe.code, pe.message, pe.httpStatus)
@@ -327,7 +344,7 @@ func (p *plugin) executeWithSticky(raw []byte, trace *[]attemptTrace, allowStick
 	var lastStatus int
 	var summaries []string
 	for _, member := range attempts {
-		if p.cfg.TotalTimeoutDur > 0 && p.rt.now().Sub(start) > p.cfg.TotalTimeoutDur {
+		if p.conf().TotalTimeoutDur > 0 && p.rt.now().Sub(start) > p.conf().TotalTimeoutDur {
 			return pluginabi.NewErrorEnvelope("group_exhausted", "单请求总时间预算已耗尽", http.StatusGatewayTimeout)
 		}
 
@@ -351,11 +368,11 @@ func (p *plugin) executeWithSticky(raw []byte, trace *[]attemptTrace, allowStick
 				Alt:           req.Alt,
 			},
 			HostCallbackID: req.HostCallbackID,
-		}, p.cfg.AttemptTimeoutDur)
+		}, p.conf().AttemptTimeoutDur)
 
 		if callErr != nil {
 			status := httpStatusFromError(callErr)
-			cd := p.rt.recordCooldown(member, status, callErr.Error(), p.cfg)
+			cd := p.rt.recordCooldown(member, status, callErr.Error(), *p.conf())
 			p.rt.recordFailure(member, status)
 			lastStatus = orStatus(status, lastStatus)
 			if !isNestedExecution(req.Metadata) {
@@ -376,7 +393,7 @@ func (p *plugin) executeWithSticky(raw []byte, trace *[]attemptTrace, allowStick
 			return errorEnvelope("plugin_error", "解析 host.model.execute 响应失败: "+err.Error()), nil
 		}
 		if resp.StatusCode >= 400 {
-			cd := p.rt.recordCooldown(member, resp.StatusCode, "", p.cfg)
+			cd := p.rt.recordCooldown(member, resp.StatusCode, "", *p.conf())
 			p.rt.recordFailure(member, resp.StatusCode)
 			lastStatus = orStatus(resp.StatusCode, lastStatus)
 			if !isNestedExecution(req.Metadata) {

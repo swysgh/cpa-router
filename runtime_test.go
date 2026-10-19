@@ -19,7 +19,7 @@ func TestRoundRobinPointerAdvances(t *testing.T) {
 	p := newTestPlugin(t, groups3RoundRobin(), defaultConfig())
 	var got []string
 	for i := 0; i < 4; i++ {
-		out, err := p.expand("g", 1, map[string]bool{}, false, "")
+		out, err := p.expand("g", 1, map[string]bool{}, expandOpts{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -40,7 +40,7 @@ func TestFallbackOrder(t *testing.T) {
 			{Model: "m2", Enabled: true},
 		}},
 	}}, defaultConfig())
-	out, err := p.expand("g", 1, map[string]bool{}, false, "")
+	out, err := p.expand("g", 1, map[string]bool{}, expandOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,10 +54,10 @@ func TestCoolingRemovesMember(t *testing.T) {
 	p := newTestPlugin(t, groups3RoundRobin(), defaultConfig())
 	p.rt.setClock(func() time.Time { return clock })
 	// Force m1 into cooldown for 30s.
-	p.rt.recordCooldown("m1", 429, "", p.cfg)
+	p.rt.recordCooldown("m1", 429, "", *p.conf())
 	clock = clock.Add(5 * time.Second) // still cooling
 	p.rt.nowFunc = func() time.Time { return clock }
-	out, err := p.expand("g", 1, map[string]bool{}, false, "")
+	out, err := p.expand("g", 1, map[string]bool{}, expandOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestNestingExpandOrder(t *testing.T) {
 			{Model: "d", Enabled: true},
 		}},
 	}}, defaultConfig())
-	out, err := p.expand("outer", 1, map[string]bool{}, false, "")
+	out, err := p.expand("outer", 1, map[string]bool{}, expandOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestDepthLimit(t *testing.T) {
 	}
 	groups = append(groups, rawGroup{Name: "leaf", Enabled: true, Members: []rawMember{{Model: "m"}}})
 	p := newTestPlugin(t, groupFile{Version: 1, Groups: groups}, defaultConfig())
-	_, err := p.expand("l0", 1, map[string]bool{}, false, "")
+	_, err := p.expand("l0", 1, map[string]bool{}, expandOpts{})
 	if err == nil || !containsSubstr(err.Error(), "嵌套层数") {
 		t.Fatalf("expected depth error, got %v", err)
 	}
@@ -139,7 +139,7 @@ func TestNestedCycle(t *testing.T) {
 		{Name: "a", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 		{Name: "b", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 	}}, defaultConfig())
-	out, err := p.expand("root", 1, map[string]bool{}, false, "")
+	out, err := p.expand("root", 1, map[string]bool{}, expandOpts{})
 	if err != nil {
 		t.Fatalf("diamond expand error: %v", err)
 	}
@@ -153,13 +153,15 @@ func TestBackoffSequence(t *testing.T) {
 	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "g", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 	}}, defaultConfig())
-	p.cfg.Cooldown.Jitter = 0 // deterministic
+	_cfg := *p.conf()
+	_cfg.Cooldown.Jitter = 0 // deterministic
+	p.setConfig(_cfg)
 
 	// Sequence of 429s: 30s, 60s, 120s.
 	want := []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second}
 	for i, w := range want {
 		p.rt.nowFunc = func() time.Time { return clock }
-		d := p.rt.recordCooldown("m1", 429, "", p.cfg)
+		d := p.rt.recordCooldown("m1", 429, "", *p.conf())
 		if d != w {
 			t.Fatalf("backoff[%d] = %v, want %v", i, d, w)
 		}
@@ -168,7 +170,7 @@ func TestBackoffSequence(t *testing.T) {
 	// Exceeds max (30m) -> capped.
 	for i := 0; i < 20; i++ {
 		p.rt.nowFunc = func() time.Time { return clock }
-		d := p.rt.recordCooldown("m1", 429, "", p.cfg)
+		d := p.rt.recordCooldown("m1", 429, "", *p.conf())
 		clock = clock.Add(d)
 		if d > 30*time.Minute {
 			t.Fatalf("backoff exceeded max: %v", d)
@@ -185,7 +187,7 @@ func TestOther4xxNoCooldown(t *testing.T) {
 	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "g", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 	}}, defaultConfig())
-	p.rt.recordCooldown("m1", 400, "", p.cfg)
+	p.rt.recordCooldown("m1", 400, "", *p.conf())
 	if p.rt.isCooling("m1") {
 		t.Fatalf("4xx (400) should not cool down")
 	}
@@ -206,7 +208,7 @@ func TestAllCoolingWait(t *testing.T) {
 	// m1 cools for 10s (within max_wait 15s), so the wait should sleep ~10s and
 	// then recover the member.
 	p.rt.cooldowns["m1"] = &cooldownState{Until: base.Add(10 * time.Second), Level: 1, LastStatus: 429}
-	attempts, err := p.selectAttempts(p.mustGroup("g"), "")
+	attempts, err := p.selectAttempts(p.mustGroup("g"), selectOpts{})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("selectAttempts wait error: %v", err)
@@ -227,8 +229,8 @@ func TestAllCoolingFirst(t *testing.T) {
 		{Name: "g", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 	}}, cfg)
 	p.rt.setClock(func() time.Time { return clock })
-	p.rt.recordCooldown("m1", 429, "", p.cfg)
-	attempts, err := p.selectAttempts(p.mustGroup("g"), "")
+	p.rt.recordCooldown("m1", 429, "", *p.conf())
+	attempts, err := p.selectAttempts(p.mustGroup("g"), selectOpts{})
 	if err != nil {
 		t.Fatalf("selectAttempts first error: %v", err)
 	}
@@ -243,8 +245,8 @@ func TestAllCoolingError(t *testing.T) {
 	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "g", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 	}}, cfg)
-	p.rt.recordCooldown("m1", 429, "", p.cfg)
-	_, err := p.selectAttempts(p.mustGroup("g"), "")
+	p.rt.recordCooldown("m1", 429, "", *p.conf())
+	_, err := p.selectAttempts(p.mustGroup("g"), selectOpts{})
 	if err == nil {
 		t.Fatalf("error policy should return error when all cooling")
 	}
@@ -256,7 +258,7 @@ func TestDedupAndMaxAttempts(t *testing.T) {
 		{Name: "b", Enabled: true, Members: []rawMember{{Model: "m1"}}},
 		{Name: "g", Enabled: true, Members: []rawMember{{Group: "a"}, {Group: "b"}, {Model: "m1"}}},
 	}}, defaultConfig())
-	out, err := p.expand("g", 1, map[string]bool{}, false, "")
+	out, err := p.expand("g", 1, map[string]bool{}, expandOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +274,7 @@ func TestDedupAndMaxAttempts(t *testing.T) {
 			{Model: "m1"}, {Model: "m2"}, {Model: "m3"}, {Model: "m4"},
 		}},
 	}}, cfg)
-	out2, err := p2.expand("g", 1, map[string]bool{}, false, "")
+	out2, err := p2.expand("g", 1, map[string]bool{}, expandOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}

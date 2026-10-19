@@ -86,7 +86,7 @@ func (p *plugin) executeStreamWithSticky(raw []byte, trace *[]attemptTrace, allo
 	if allowSticky {
 		stickyKey = p.stickyKey(&req)
 	}
-	attempts, err := p.selectAttempts(g, stickyKey)
+	attempts, err := p.selectAttempts(g, selectOpts{stickyKey: stickyKey, peek: !allowSticky})
 	if err != nil {
 		if pe, ok := err.(*pluginError); ok {
 			return pluginabi.NewErrorEnvelope(pe.code, pe.message, pe.httpStatus)
@@ -118,7 +118,7 @@ func (p *plugin) executeStreamWithSticky(raw []byte, trace *[]attemptTrace, allo
 	hitIndex := -1
 	lastStatus := 0
 	for i, member := range attempts {
-		if p.cfg.TotalTimeoutDur > 0 && p.rt.now().Sub(startTime) > p.cfg.TotalTimeoutDur {
+		if p.conf().TotalTimeoutDur > 0 && p.rt.now().Sub(startTime) > p.conf().TotalTimeoutDur {
 			break
 		}
 		streamID, ok := p.openMemberStream(g, member, fwd, req.HostCallbackID, "stream preflight", trace)
@@ -172,11 +172,11 @@ func (p *plugin) openMemberStream(g *group, member string, fwd streamForwardCtx,
 			Alt:           fwd.Alt,
 		},
 		HostCallbackID: hostCallbackID,
-	}, p.cfg.AttemptTimeoutDur)
+	}, p.conf().AttemptTimeoutDur)
 
 	if callErr != nil {
 		status := httpStatusFromError(callErr)
-		cd := p.rt.recordCooldown(member, status, callErr.Error(), p.cfg)
+		cd := p.rt.recordCooldown(member, status, callErr.Error(), *p.conf())
 		p.rt.recordFailure(member, status)
 		recordAttemptTrace(trace, attemptTrace{
 			Member: member, Status: status, Error: callErr.Error(),
@@ -197,7 +197,7 @@ func (p *plugin) openMemberStream(g *group, member string, fwd streamForwardCtx,
 		return "", false
 	}
 	if resp.StatusCode >= 400 {
-		cd := p.rt.recordCooldown(member, resp.StatusCode, "", p.cfg)
+		cd := p.rt.recordCooldown(member, resp.StatusCode, "", *p.conf())
 		p.rt.recordFailure(member, resp.StatusCode)
 		if strings.TrimSpace(resp.StreamID) != "" {
 			p.closeHostModelStream(resp.StreamID)
@@ -260,7 +260,7 @@ func (p *plugin) forwardStream(g *group, attempts []string, hitIndex int, firstS
 		}
 		// No payload was delivered and the plugin stream is still open: cool the
 		// member down and try the next one.
-		cd := p.rt.recordCooldown(member, 0, "stream read failed before first payload", p.cfg)
+		cd := p.rt.recordCooldown(member, 0, "stream read failed before first payload", *p.conf())
 		p.rt.recordFailure(member, 0)
 		p.log.warn("stream member failed before first payload", map[string]any{
 			"group": g.Name, "member": member, "cooldown": int(cd.Seconds()),

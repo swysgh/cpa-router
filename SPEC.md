@@ -495,7 +495,7 @@ func (e *hostError) StatusCode() int   // 返回 HTTPStatus，供 HTTPStatusFrom
 
 - 所有响应 `Content-Type: application/json; charset=utf-8`。
 - 管理 API 的写操作成功后：落盘状态文件 + 立刻生效（内存里的组定义同步替换）+ 返回最新 state。
-- `POST /plugins/cpa-router/test` 走**真实的** §8.3 执行路径（这是验收工具，不要造假数据）；`prompt` 为空时用 `"只回复两个字:收到"`。
+- `POST /plugins/cpa-router/test` 走**真实的** §8.3 执行路径（这是验收工具，不要造假数据）；`prompt` 为空时用 `"只回复两个字:收到"`。但探测请求**只读**共享调度状态：不推进轮询指针、不写粘性绑定（`expandOpts.peek`），否则面板点几次「测试」就会把真实流量的轮询起点推走；失败仍会写真实冷却（那是真的上游失败）。
 
 ### 10.3 资源页（`panel.html`）
 

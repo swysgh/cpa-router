@@ -128,7 +128,7 @@ func mgmtResponseRaw(status int, body []byte) *pluginapi.ManagementResponse {
 
 func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementResponse, error) {
 	p.mu.RLock()
-	cfg := p.cfg
+	cfg := *p.conf()
 	absPath := p.statePath
 	p.mu.RUnlock()
 
@@ -163,7 +163,7 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 		gt := gtokens[g.Name]
 		groupView = append(groupView, map[string]any{
 			"name":        g.Name,
-			"call_name":   p.cfg.NamePrefix + g.Name,
+			"call_name":   p.conf().NamePrefix + g.Name,
 			"strategy":    g.Strategy,
 			"enabled":     g.Enabled,
 			"description": g.Description,
@@ -559,7 +559,7 @@ func (p *plugin) buildTestBody(g *group, override, prompt string) []byte {
 	model := override
 	if model == "" {
 		// Use the first expanded member (or group call name fallback).
-		if attempts, err := p.expand(g.Name, 1, map[string]bool{}, false, ""); err == nil && len(attempts) > 0 {
+		if attempts, err := p.expand(g.Name, 1, map[string]bool{}, expandOpts{peek: true}); err == nil && len(attempts) > 0 {
 			model = attempts[0]
 		} else {
 			model = g.Name
@@ -607,15 +607,15 @@ func (p *plugin) currentGroupFile() groupFile {
 
 // applyGroups validates, persists, and swaps the in-memory groups atomically.
 func (p *plugin) applyGroups(f groupFile) error {
-	f, notes := normalizeGroupRefs(f, p.cfg.NamePrefix)
+	f, notes := normalizeGroupRefs(f, p.conf().NamePrefix)
 	if len(notes) > 0 {
 		p.log.info("组成员引用已归一化", map[string]any{"notes": notes})
 	}
-	groups, _, err := parseGroups(f, p.cfg.NamePrefix)
+	groups, _, err := parseGroups(f, p.conf().NamePrefix)
 	if err != nil {
 		return err
 	}
-	if err := validateModelMembers(groups, p.cfg.NamePrefix); err != nil {
+	if err := validateModelMembers(groups, p.conf().NamePrefix); err != nil {
 		return err
 	}
 	if p.store != nil {
@@ -626,7 +626,7 @@ func (p *plugin) applyGroups(f groupFile) error {
 	// Sort before publishing: readers walk p.groups under RLock only, so
 	// reordering the backing array after the swap would be a data race.
 	sortGroupsByName(groups)
-	nameIdx := buildGroupNameIndex(groups, p.cfg.NamePrefix)
+	nameIdx := buildGroupNameIndex(groups, p.conf().NamePrefix)
 	p.mu.Lock()
 	p.groups = groups
 	p.nameIndex = nameIdx

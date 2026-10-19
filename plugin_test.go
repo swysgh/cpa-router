@@ -34,7 +34,7 @@ func decodeModelRegistration(t *testing.T, p *plugin) pluginapi.ModelRegistratio
 func TestModelRegistrationAdvertisesGroups(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "free-stack", Strategy: "fallback", Enabled: true, Description: "免费优先",
 			Aliases: []string{"free"}, Members: []rawMember{{Model: "m1", Enabled: true}}},
@@ -81,8 +81,10 @@ func TestModelRegistrationAdvertisesGroups(t *testing.T) {
 func TestModelRegistrationHonoursNamePrefix(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
-	p.cfg.NamePrefix = "r/"
+	p.setConfig(defaultConfig())
+	_cfg := *p.conf()
+	_cfg.NamePrefix = "r/"
+	p.setConfig(_cfg)
 	parsed, _, _ := parseGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "g1", Strategy: "fallback", Enabled: true, Aliases: []string{"one"},
 			Members: []rawMember{{Model: "m1", Enabled: true}}},
@@ -107,7 +109,7 @@ func TestModelRegistrationHonoursNamePrefix(t *testing.T) {
 func TestModelRegistrationEmptyIsValid(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	reg := decodeModelRegistration(t, p)
 	if reg.Provider == "" {
 		t.Error("Provider must stay non-empty even with no groups")

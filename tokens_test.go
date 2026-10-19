@@ -410,8 +410,8 @@ func TestStateExposesTokenCounters(t *testing.T) {
 		t.Errorf("models[m1].input_tokens = %v, want 41", got)
 	}
 	cfgView, _ := m["config"].(map[string]any)
-	if got := cfgView["stats_file"]; got != p.cfg.StatsFile {
-		t.Errorf("config.stats_file = %v, want %v", got, p.cfg.StatsFile)
+	if got := cfgView["stats_file"]; got != p.conf().StatsFile {
+		t.Errorf("config.stats_file = %v, want %v", got, p.conf().StatsFile)
 	}
 }
 

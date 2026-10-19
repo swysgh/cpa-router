@@ -74,7 +74,7 @@ func TestValidateModelMembersRejectsGroupCallNames(t *testing.T) {
 func TestApplyGroupsRejectsSelfReferencingModelMember(t *testing.T) {
 	h := newFakeHost()
 	p := newPlugin(h)
-	p.cfg = defaultConfig()
+	p.setConfig(defaultConfig())
 	err := p.applyGroups(groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "a", Strategy: "fallback", Enabled: true,
 			Members: []rawMember{{Model: "a", Enabled: true}}},

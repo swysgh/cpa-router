@@ -150,7 +150,7 @@ func TestManagementReset(t *testing.T) {
 		{Name: "g1", Members: []rawMember{{Model: "m1"}}},
 	}}, defaultConfig())
 	// Put m1 into cooldown.
-	p.rt.recordCooldown("m1", 429, "", p.cfg)
+	p.rt.recordCooldown("m1", 429, "", *p.conf())
 	if !p.rt.isCooling("m1") {
 		t.Fatal("m1 should be cooling")
 	}

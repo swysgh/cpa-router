@@ -13,15 +13,15 @@ import (
 // Header sources win over the body fingerprint: a client that sends an explicit
 // session id knows its conversation boundaries better than we can infer them.
 func (p *plugin) stickyKey(req *rpcExecutorRequest) string {
-	if !p.cfg.Sticky {
+	if !p.conf().Sticky {
 		return ""
 	}
-	for _, h := range p.cfg.StickyHeaders {
+	for _, h := range p.conf().StickyHeaders {
 		if v := strings.TrimSpace(req.Headers.Get(h)); v != "" {
 			return "h:" + v
 		}
 	}
-	if !p.cfg.StickyBodyFingerprint {
+	if !p.conf().StickyBodyFingerprint {
 		return ""
 	}
 	body := req.OriginalRequest
