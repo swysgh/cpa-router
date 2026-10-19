@@ -52,6 +52,7 @@ func bodyFingerprint(body []byte) string {
 		instructions = firstText(probe.System)
 	}
 	var firstUser string
+	seenUser := false
 	for _, raw := range probe.Messages {
 		var m struct {
 			Role    string          `json:"role"`
@@ -66,11 +67,19 @@ func bodyFingerprint(body []byte) string {
 				instructions = firstText(m.Content)
 			}
 		case "user":
-			if firstUser == "" {
+			// Freeze on the FIRST user message even when it carries no text
+			// (image-only opening turn): taking the first user message that
+			// happens to have text would re-key the conversation as soon as a
+			// later turn adds words.
+			if !seenUser {
+				seenUser = true
 				firstUser = firstText(m.Content)
+				if firstUser == "" {
+					firstUser = "raw:" + digestBytes(m.Content, 4096)
+				}
 			}
 		}
-		if firstUser != "" {
+		if seenUser {
 			break
 		}
 	}
@@ -121,4 +130,16 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n])
+}
+
+// digestBytes hashes at most limit bytes of raw content. It backs the
+// image-only opening turn case: there is no text to hash, but the raw content
+// is stable across turns, and capping it keeps a multi-megabyte base64 image
+// from being hashed on every request.
+func digestBytes(b []byte, limit int) string {
+	if len(b) > limit {
+		b = b[:limit]
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])[:16]
 }

@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -94,12 +97,14 @@ func TestStickyReassignsWhenPinnedMemberCools(t *testing.T) {
 }
 
 func TestStickyKeysAreScopedPerGroup(t *testing.T) {
+	// Distinct members per group: with identical members a missing group
+	// component in the pin key would still produce "m1" and pass silently.
 	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
 		{Name: "g", Strategy: "round-robin", Enabled: true, Members: []rawMember{
 			{Model: "m1", Enabled: true}, {Model: "m2", Enabled: true},
 		}},
 		{Name: "h", Strategy: "round-robin", Enabled: true, Members: []rawMember{
-			{Model: "m1", Enabled: true}, {Model: "m2", Enabled: true},
+			{Model: "m3", Enabled: true}, {Model: "m4", Enabled: true},
 		}},
 	}}, stickyCfg())
 
@@ -110,8 +115,14 @@ func TestStickyKeysAreScopedPerGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out[0] != "m1" {
-		t.Fatalf("group h first pick = %s, want its own m1", out[0])
+	if out[0] != "m3" {
+		t.Fatalf("group h first pick = %s, want its own m3 (pin leaked across groups?)", out[0])
+	}
+	p.rt.mu.Lock()
+	hPointer := p.rt.pointers["h"]
+	p.rt.mu.Unlock()
+	if hPointer != 1 {
+		t.Fatalf("group h pointer = %d, want 1 (h must take its own new-session path)", hPointer)
 	}
 }
 
@@ -237,5 +248,144 @@ func TestTestEndpointDoesNotCreatePins(t *testing.T) {
 	p.rt.mu.Unlock()
 	if pins != 0 {
 		t.Fatalf("/test wrote %d sticky pin(s), want 0", pins)
+	}
+}
+
+func TestBodyFingerprintStableWithImageFirstTurn(t *testing.T) {
+	imageOnly := []byte(`{"messages":[
+		{"role":"system","content":"sys prompt"},
+		{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`)
+	withText := []byte(`{"messages":[
+		{"role":"system","content":"sys prompt"},
+		{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},
+		{"role":"assistant","content":"I see a chart"},
+		{"role":"user","content":"describe it"}]}`)
+	a, b := bodyFingerprint(imageOnly), bodyFingerprint(withText)
+	if a == "" || b == "" {
+		t.Fatalf("empty fingerprint: %q %q", a, b)
+	}
+	if a != b {
+		t.Fatalf("same conversation re-keyed after adding a text turn: %s vs %s", a, b)
+	}
+}
+
+func TestStickyHitDoesNotAdvancePointer(t *testing.T) {
+	p := newTestPlugin(t, groups3RoundRobin(), stickyCfg())
+	expandFirst(t, p, "h:sess") // new session: pointer 0 -> 1
+	p.rt.mu.Lock()
+	afterFirst := p.rt.pointers["g"]
+	p.rt.mu.Unlock()
+	if afterFirst != 1 {
+		t.Fatalf("pointer after new session = %d, want 1", afterFirst)
+	}
+	for i := 0; i < 3; i++ {
+		expandFirst(t, p, "h:sess")
+	}
+	p.rt.mu.Lock()
+	afterHits := p.rt.pointers["g"]
+	p.rt.mu.Unlock()
+	if afterHits != afterFirst {
+		t.Fatalf("pointer advanced on sticky hits: %d -> %d (keyless traffic would drift)", afterFirst, afterHits)
+	}
+}
+
+func TestStickyConcurrentSessionsStayConsistent(t *testing.T) {
+	p := newTestPlugin(t, groups3RoundRobin(), stickyCfg())
+	const shared = "h:shared"
+	// Warm the shared pin so all goroutines race on the hit path too.
+	want := expandFirst(t, p, shared)
+
+	var wg sync.WaitGroup
+	results := make(chan string, 64)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := shared
+			if i%2 == 1 {
+				key = "h:unique-" + strconv.Itoa(i)
+			}
+			out, err := p.expand("g", 1, map[string]bool{}, false, key)
+			if err != nil {
+				results <- "err:" + err.Error()
+				return
+			}
+			results <- out[0]
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+	for got := range results {
+		if strings.HasPrefix(got, "err:") {
+			t.Fatalf("concurrent expand failed: %s", got)
+		}
+	}
+	// The shared session must still resolve to the same member afterwards.
+	if got := expandFirst(t, p, shared); got != want {
+		t.Fatalf("shared session drifted under concurrency: %s -> %s", want, got)
+	}
+}
+
+func TestStickyPropagatesIntoNestedRoundRobinGroup(t *testing.T) {
+	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
+		{Name: "outer", Strategy: "round-robin", Enabled: true, Members: []rawMember{
+			{Group: "inner", Enabled: true},
+		}},
+		{Name: "inner", Strategy: "round-robin", Enabled: true, Members: []rawMember{
+			{Model: "i1", Enabled: true}, {Model: "i2", Enabled: true},
+		}},
+	}}, stickyCfg())
+
+	first, err := p.expand("outer", 1, map[string]bool{}, false, "h:sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		got, err := p.expand("outer", 1, map[string]bool{}, false, "h:sess")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0] != first[0] {
+			t.Fatalf("nested group lost the session key: %s then %s", first[0], got[0])
+		}
+	}
+}
+
+func TestStickyAllCoolingFirstPinsServedMember(t *testing.T) {
+	cfg := stickyCfg()
+	cfg.AllCoolingPolicy = "first"
+	p := newTestPlugin(t, groupFile{Version: 1, Groups: []rawGroup{
+		{Name: "g", Strategy: "round-robin", Enabled: true, Members: []rawMember{
+			{Model: "m1", Enabled: true}, {Model: "m2", Enabled: true},
+		}},
+	}}, cfg)
+
+	p.rt.recordCooldown("m1", 429, "", p.cfg) // cools first
+	p.rt.recordCooldown("m2", 429, "", p.cfg)
+
+	attempts, err := p.selectAttempts(p.mustGroup("g"), "h:sess")
+	if err != nil {
+		t.Fatalf("selectAttempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempts = %v, want exactly the earliest-expiry pick", attempts)
+	}
+	p.rt.mu.Lock()
+	pin := p.rt.sticky[stickyMapKey("g", "h:sess")]
+	p.rt.mu.Unlock()
+	if pin == nil || pin.Member != attempts[0] {
+		t.Fatalf("pin = %v, served = %s (pin must follow the member that serves)", pin, attempts[0])
+	}
+}
+
+func TestBodyFingerprintReadsResponsesInstructions(t *testing.T) {
+	a := []byte(`{"instructions":"be terse","messages":[{"role":"user","content":"hi"}]}`)
+	b := []byte(`{"instructions":"be terse","messages":[{"role":"user","content":"hi"},{"role":"user","content":"more"}]}`)
+	c := []byte(`{"instructions":"be verbose","messages":[{"role":"user","content":"hi"}]}`)
+	if bodyFingerprint(a) == "" || bodyFingerprint(a) != bodyFingerprint(b) {
+		t.Fatal("top-level instructions not used, or unstable across turns")
+	}
+	if bodyFingerprint(a) == bodyFingerprint(c) {
+		t.Fatal("different instructions hashed the same")
 	}
 }

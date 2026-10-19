@@ -91,19 +91,11 @@ func (p *plugin) expand(groupName string, depth int, visited map[string]bool, ig
 	}
 
 	if g.Strategy == "round-robin" && len(eligible) > 0 {
-		start := -1
-		if want := p.rt.stickyMember(g.Name, stickyKey, p.cfg.StickyTTLDur); want != "" {
-			for i, m := range eligible {
-				if memberIdentity(m) == want {
-					start = i
-					break
-				}
-			}
+		ids := make([]string, len(eligible))
+		for i, m := range eligible {
+			ids[i] = memberIdentity(m)
 		}
-		if start < 0 {
-			start = p.rt.pointerAdvance(groupName) % len(eligible)
-			p.rt.stickyAssign(g.Name, stickyKey, memberIdentity(eligible[start]), p.cfg.StickyTTLDur)
-		}
+		start := p.rt.stickyStart(g.Name, stickyKey, ids, p.cfg.StickyTTLDur)
 		eligible = append(append([]member{}, eligible[start:]...), eligible[:start]...)
 	}
 
@@ -181,6 +173,9 @@ func (p *plugin) selectAttempts(g *group, stickyKey string) ([]string, error) {
 				bestUntil = u
 			}
 		}
+		// ignored-expand pins the member the rotation pointed at, which is not
+		// the member about to serve. Pin what actually serves instead.
+		p.rt.stickyAssign(g.Name, stickyKey, pick, p.cfg.StickyTTLDur)
 		return []string{pick}, nil
 	case "wait":
 		fallthrough

@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 )
@@ -252,41 +253,76 @@ func (r *runtimeState) groupStat(name string) *groupStat {
 	return g
 }
 
-// pointerAdvance returns the current round-robin pointer for a group and
-// advances it by 1 (§7.2).
-func (r *runtimeState) pointerAdvance(name string) int {
+// stickyStart picks the round-robin start index for one request in a single
+// critical section: look up the session pin, and when there is none advance the
+// per-group pointer and record the new pin. Doing all three under one lock keeps
+// two simultaneous first requests of the same session from advancing the
+// pointer twice and pinning two different members.
+//
+// identities are the eligible members in declaration order (memberIdentity
+// strings). key == "" means plain rotation with no pinning.
+func (r *runtimeState) stickyStart(group, key string, identities []string, ttl time.Duration) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	p := r.pointers[name]
-	r.pointers[name] = p + 1
-	return p
+	now := r.clock()
+
+	mk := ""
+	if key != "" && ttl > 0 {
+		mk = stickyMapKey(group, key)
+		if e, ok := r.sticky[mk]; ok {
+			if !e.Expires.After(now) {
+				delete(r.sticky, mk)
+			} else {
+				for i, id := range identities {
+					if id == e.Member {
+						e.Expires = now.Add(ttl)
+						return i
+					}
+				}
+				delete(r.sticky, mk) // pinned member is gone (cooling/removed)
+			}
+		}
+	}
+
+	start := r.pointers[group] % len(identities)
+	r.pointers[group] = r.pointers[group] + 1
+	if mk != "" {
+		r.sticky[mk] = &stickyEntry{Member: identities[start], Expires: now.Add(ttl)}
+		if now.Sub(r.stickySweep) > ttl || len(r.sticky) > 4096 {
+			r.stickySweep = now
+			for k, e := range r.sticky {
+				if !e.Expires.After(now) {
+					delete(r.sticky, k)
+				}
+			}
+		}
+	}
+	return start
 }
 
 // stickyMapKey scopes one session key to one group: two groups called from the
 // same conversation get independent pins.
 func stickyMapKey(group, key string) string { return group + "\x00" + key }
 
-// stickyMember returns the member pinned to this session, or "" when there is
-// no live pin. A hit refreshes the TTL so an active conversation never lapses
-// mid-flight.
-func (r *runtimeState) stickyMember(group, key string, ttl time.Duration) string {
-	if key == "" || ttl <= 0 {
-		return ""
-	}
+// stickyStats reports how many live pins exist, per group. It exists to make
+// the failure mode "every client sends the same constant session header, so all
+// traffic pinned to one member" visible instead of silent.
+func (r *runtimeState) stickyStats() map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	mk := stickyMapKey(group, key)
-	e, ok := r.sticky[mk]
-	if !ok {
-		return ""
-	}
 	now := r.clock()
-	if !e.Expires.After(now) {
-		delete(r.sticky, mk)
-		return ""
+	byGroup := make(map[string]int, 8)
+	total := 0
+	for k, e := range r.sticky {
+		if !e.Expires.After(now) {
+			continue
+		}
+		if i := strings.IndexByte(k, 0); i > 0 {
+			byGroup[k[:i]]++
+		}
+		total++
 	}
-	e.Expires = now.Add(ttl)
-	return e.Member
+	return map[string]any{"pins": total, "by_group": byGroup}
 }
 
 // stickyAssign pins member to this session. Expired pins are swept here rather
