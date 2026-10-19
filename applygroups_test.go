@@ -1,16 +1,19 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
+
+// enabledGroup builds a raw group with one model member so the group passes
+// validation and is published.
+func enabledGroup(name string, aliases ...string) rawGroup {
+	return rawGroup{Name: name, Strategy: "fallback", Enabled: true, Aliases: aliases,
+		Members: []rawMember{{Model: "m1", Enabled: true}}}
+}
 
 // applyGroupsInput builds a group file whose declaration order is deliberately
 // not alphabetical: the old implementation published this slice and only then
@@ -30,18 +33,15 @@ func applyGroupsInput() groupFile {
 //
 // after p.mu.Unlock() while p.groups still shared that backing array, so every
 // reader that copies or walks p.groups under RLock — allGroupsSnapshot (/state,
-// the panel), callNameSnapshot (model.register and the v0.6.0 /v1/models
-// filter), resolveGroup (route/executor, which even hands out a pointer into the
-// array) — could race with the reorder. The reorder must happen before the swap
-// so the published slice is never mutated again, and the sorted order must still
-// be what the next read sees.
+// the panel), resolveGroup (route/executor, which even hands out a pointer into
+// the array), modelRegistrationJSON (model.register) — could race with the
+// reorder. The reorder must happen before the swap so the published slice is
+// never mutated again, and the sorted order must still be what the next read
+// sees.
 func TestApplyGroupsRaceFreeUnderConcurrentReaders(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.NamePrefix = "r/"
 	p := newTestPlugin(t, applyGroupsInput(), cfg)
-
-	raw := interceptRaw(t, modelListSourceFormat,
-		modelListJSON(t, `{"id":"r/a"}`, `{"id":"r/b"}`, `{"id":"r/c"}`, `{"id":"other"}`))
 
 	var readers, writer sync.WaitGroup
 	stop := make(chan struct{})
@@ -78,36 +78,16 @@ func TestApplyGroupsRaceFreeUnderConcurrentReaders(t *testing.T) {
 		go func() {
 			defer readers.Done()
 			for i := 0; i < 300; i++ {
-				snap := p.callNameSnapshot()
-				seen := 0
-				snap.forEachEnabledCallName(func(id string, g group) { seen++ })
-				if seen == 0 || len(snap.modelInfos()) == 0 {
-					fail("callNameSnapshot lost every call name")
+				if got := p.allGroupsSnapshot(); len(got) != 3 {
+					fail("allGroupsSnapshot len = %d, want 3", len(got))
 					return
 				}
 				if _, ok := p.resolveGroup("r/a"); !ok {
 					fail("resolveGroup(r/a) missed a group that is always present")
 					return
 				}
-				if got := p.allGroupsSnapshot(); len(got) != 3 {
-					fail("allGroupsSnapshot len = %d, want 3", len(got))
-					return
-				}
-				out, err := p.HandleMethod(pluginabi.MethodResponseInterceptAfter, raw)
-				if err != nil {
-					fail("intercept: %v", err)
-					return
-				}
-				var env struct {
-					OK     bool                                `json:"ok"`
-					Result pluginapi.ResponseInterceptResponse `json:"result"`
-				}
-				if err := json.Unmarshal(out, &env); err != nil || !env.OK {
-					fail("bad intercept envelope: %s", out)
-					return
-				}
-				if len(env.Result.Body) > 0 && !json.Valid(env.Result.Body) {
-					fail("filtered body is not JSON: %s", env.Result.Body)
+				if len(p.modelRegistrationJSON().Models) == 0 {
+					fail("model.register lost every call name")
 					return
 				}
 			}

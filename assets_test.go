@@ -237,11 +237,8 @@ func TestPanelMemberNamePickers(t *testing.T) {
 			t.Errorf("panel.html must keep %s", fn)
 		}
 	}
-	if !strings.Contains(html, `api("/plugins/cpa-router/models","GET")`) {
-		t.Error("panel.html must load model names from the plugin's own catalog first")
-	}
 	if !strings.Contains(html, `api("/model-prices/runtime-models","GET")`) {
-		t.Error("panel.html must still read the host runtime catalog")
+		t.Error("panel.html must load model names from the host runtime catalog")
 	}
 	if !strings.Contains(html, `api("/config","GET")`) {
 		t.Error("panel.html must also read the config: it is the only source for models whose keys live in config.yaml")
@@ -268,14 +265,6 @@ func TestPanelMemberNamePickers(t *testing.T) {
 	}
 	if !strings.Contains(html, "refreshDatalists()") {
 		t.Error("panel.html must refresh the picker after loading")
-	}
-	// OAuth models (antigravity's anti/*) are only in the catalog once the host has
-	// answered a model list, so the panel must surface that snapshot and say when
-	// it is still missing instead of showing a silently short candidate list.
-	for _, want := range []string{"registry_seen_at", "registryHint("} {
-		if !strings.Contains(html, want) {
-			t.Errorf("panel.html must surface the host model-list snapshot: missing %q", want)
-		}
 	}
 }
 

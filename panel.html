@@ -537,7 +537,6 @@ let MODEL_PICKS = [];   // host runtime model catalog
 let GROUP_PICKS = [];   // group call names + prefixed aliases + internal names
 let GROUP_MAP = {};     // internal name -> group (for cooling recursion)
 let NAME_PREFIX = "";   // from /state config; aliases are callable as prefix+alias
-let REGISTRY_SEEN_AT = 0; // unix secs of the host model-list snapshot (0 = not cached yet)
 let modelNamesState = "idle"; // idle | loading | done
 
 async function render(){
@@ -571,7 +570,7 @@ async function render(){
     document.getElementById("ovCool").textContent=String(coolSum);
     document.getElementById("ovReqs").textContent=String(reqSum);
     document.getElementById("ovTokens").textContent=fmtTokens(tokSum);
-    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.6.0");
+    document.getElementById("verChip").textContent="v"+((s.plugin&&s.plugin.version)||"0.5.1");
     document.getElementById("counts").textContent="组 "+gs.length+" · 成员 "+memberSum;
     document.getElementById("emptyState").style.display=gs.length?"none":"";
     const gl=document.getElementById("groups"); gl.innerHTML="";
@@ -747,32 +746,17 @@ async function doReset(name,what){
 }
 
 // ---- member name candidates ----
-// The picker's candidates are the union of three sources -- this plugin's own
-// credential catalog, CPAMP's price short names, and the host config's channels
-// (callable names only) -- plus this plugin's own groups (call name, prefixed
-// alias, internal name). Picking a group nests it; picking anything else calls it
-// as a model. Free-typed names are still accepted through the picker's manual-add
-// chip, so it never blocks a value -- but every candidate the picker offers has
-// to be a name the host actually serves, otherwise a click stores a member that
-// answers 400 model_not_found.
+// The picker's candidates are the host's runtime catalog plus the models the
+// config declares (callable names only), plus this plugin's own groups (call
+// name, prefixed alias, internal name). Picking a group nests it; picking
+// anything else calls it as a model. Free-typed names are still accepted through
+// the picker's manual-add chip, so it never blocks a value -- but every candidate
+// the picker offers has to be a name the host actually serves, otherwise a click
+// stores a member that answers 400 model_not_found.
 async function loadModelNames(){
   const uniq = (a) => [...new Set(a.filter(Boolean))].sort();
   const picks = [];
-  // Primary: the plugin's own catalog (credential models + the host model-list
-  // snapshot + this plugin's group call names). It never goes through /v1/models,
-  // so the trim that hides upstream names from API clients cannot hide them here.
-  try{
-    const r = await api("/plugins/cpa-router/models","GET");
-    if(r.ok){
-      const j = await r.json();
-      if(j && Array.isArray(j.models)) picks.push(...j.models);
-      if(j && j.registry_seen_at) REGISTRY_SEEN_AT=Number(j.registry_seen_at)||0;
-    }
-  }catch(e){}
-  // CPAMP's price-catalog route (/model-prices/runtime-models). It only exists
-  // on CPAMP, not on the plain host, and what it returns are price short names
-  // (GLM, kimi, deepseek-pro, ...), not callable model ids -- so treat it as a
-  // cheap extra hint, never as the authoritative catalog.
+  // The host's runtime catalog (callable ids as the host currently serves them).
   try{
     const r = await api("/model-prices/runtime-models","GET");
     if(r.ok){
@@ -780,9 +764,9 @@ async function loadModelNames(){
       if(j && Array.isArray(j.models)) picks.push(...j.models);
     }
   }catch(e){}
-  // The config is the only source that knows about models whose provider keys
-  // live in config.yaml instead of in a credential file, so it is always worth
-  // reading; it can also list models that are configured but not currently served.
+  // The config knows about models whose provider keys live in config.yaml, so it
+  // is always worth reading; it can also list models that are configured but not
+  // currently served.
   //
   // Two rules keep names the host does not serve out of the picker:
   //   - a disabled channel registers nothing (the host skips a disabled provider
@@ -830,17 +814,8 @@ function memberPayload(name, enabled){ return memberTypeOf(name)==="group" ? {gr
 function refreshDatalists(){
   const hint=document.getElementById("pickHint");
   if(hint) hint.textContent = (MODEL_PICKS.length || GROUP_PICKS.length)
-    ? "模型 "+MODEL_PICKS.length+" 个 / 组 "+GROUP_PICKS.length+" 个"+registryHint()
+    ? "模型 "+MODEL_PICKS.length+" 个 / 组 "+GROUP_PICKS.length+" 个"
     : "";
-}
-// The plugin's catalog carries the host's own model list only after the host has
-// answered one /v1/models request since it started (that response is the only
-// complete picture -- OAuth credentials such as antigravity keep their models in
-// provider metadata, not in the credential's "models" field). A cold cache means
-// names like anti/* are simply not known yet, so say so instead of letting it
-// look like the models disappeared.
-function registryHint(){
-  return REGISTRY_SEEN_AT ? "" : "（宿主模型清单未缓存：anti/* 这类 OAuth 模型要等宿主出过一次 /v1/models 才会出现）";
 }
 function ensureModelNames(){
   if(modelNamesState !== "idle") return;

@@ -21,10 +21,7 @@
   冷却，见 `all_cooling_policy`）。
 - **UI**：CPA 管理面板里出现「模型路由」菜单，可视化增删改查组、看冷却/统计、发测试请求。
 - **管理 API + 资源页**：`/v0/resource/.../panel` 单文件面板，`/v0/management/...` 下
-  提供 state / models / groups 增删改 / reset / test 接口。
-- **`/v1/models` 只列组名**：默认把宿主的模型清单收窄到启用的组调用名（组名 + aliases + `name_prefix`），
-  客户端不会看到组背后的上游模型，也就不会绕过组直连；`filter_models: false` 可关掉。
-  管理端（面板 / CPAMP 后台）拉清单时放行，不受裁剪影响。
+  提供 state / groups 增删改 / reset / test 接口。
 
 ## 安装
 
@@ -61,7 +58,6 @@
          all_cooling_policy: "wait" # wait | first | error
          max_wait: "15s"        # wait 策略的最长等待
          log_level: "info"      # debug | info | warn | error
-         filter_models: true    # /v1/models 只显示启用的组调用名；false = 保留宿主全部模型
          cooldown:
            disable: false
            statuses: [429]              # 触发指数退避的状态码
@@ -161,6 +157,10 @@ curl -X POST .../v1/chat/completions \
   单独列在最上面的「已失效（不在模型列表）」分区**（红色、标 ✓），点一下即取消选中、
   回到外层点「保存」就会把该成员从组里删掉。模型清单尚未加载完时不显示该分区，避免把正常
   成员误判成失效。
+- 候选只给**宿主真会注册的可调用名**：候选来自宿主运行时清单 + `/config`（渠道/凭证里声明的
+  模型）+ 本插件的组调用名。`disabled: true` 的渠道/凭证整条跳过（宿主不注册它任何模型），
+  有 `prefix` 的渠道只产出 `prefix + "/" + (alias || name)`，不再额外给裸名
+  （`force-model-prefix: true` 下裸名根本不存在，点了就是死成员）。
 
 ## token 统计
 
@@ -177,55 +177,6 @@ curl -X POST .../v1/chat/completions \
 - 面板：概览「累计 tokens」、组卡片 `tokens 入/出/合计`、成员行 `tok 合计`（悬停看输入/输出）、
   组卡片「重置统计」按钮；`GET /state` 暴露 `group_total_tokens` / `group_input_tokens` /
   `group_output_tokens` / `group_token_reqs` 与 `models[].total_tokens` 等字段。
-
-## `/v1/models` 筛选
-
-默认开启（`filter_models: true`）。宿主把组名注册进模型清单后，`/v1/models` 里会同时列出组名和组背后
-的上游模型名，后者对调用组的人没有意义，还会诱导客户端绕过组直连（绕过就没有冷却/降级保护）。
-插件因此挂上 CPA 的 response interceptor（`response.intercept_after`），把这份清单收窄成
-**本插件实际注册的调用名**：启用组的组名 + aliases，都带 `name_prefix`；禁用组、成员模型、
-别人的模型都不留。
-
-安全边界（只改能证明是自己的东西）：
-
-- 只在 `SourceFormat == "openai"`、body 是 JSON object、顶层 `object == "list"`、`data` 是数组时才动；
-  Claude/Gemini 清单、普通 chat/completions 响应、非法 JSON、`data` 缺失或非数组一律**原样透传**。
-- 只替换 `data`：根对象其它字段、保留模型的原字段（`created` / `owned_by` / 未来新增字段）都不动；
-  条目读不出字符串 `id` 时保留（无法证明是自己的）；匹配 0 项输出合法的 `data: []`。
-- 没有任何变化时返回空 body，宿主字节不动；插件自身出错也不会破坏响应（宿主记 warning 后跳过插件）。
-
-注意：**没有任何组时白名单为空，`/v1/models` 会返回空数组**，此时把 `filter_models` 设为 `false`
-即可恢复宿主完整模型清单。开关属于插件配置，改完 reconfigure 立即生效（`/state` 的
-`config.filter_models` 可确认当前值）。
-
-管理端不受裁剪影响（v0.7.0）：`Referer` 含 `/management`、`/v0/management/` 或
-`/v0/resource/plugins/` 的请求，以及 `User-Agent` 含 `cpa-router-panel` / `cpamp-panel` 的请求，
-body 原样透传 —— 面板和 CPAMP 后台要靠这份清单给操作员选模型。这几个头客户端可以伪造，
-所以泄露面只当「模型名字符串」看，真正的全量清单走下面的管理端点。
-
-## 模型候选：`GET /plugins/cpa-router/models`
-
-给面板「添加成员」用的模型清单，用管理密钥鉴权，返回
-`{"models":["<上游模型名>","<组调用名>",...]}`（去重、升序）。
-
-宿主没有「列出全部模型」的回调，所以清单由三处拼出来：
-
-1. **凭证文件**：`host.auth.list` 枚举 → 逐个 `host.auth.get` 读 JSON → 取 `models` 字段（`["a","b"]` 与
-   `[{"name":"a","alias":"x"}]` 两种形态都支持，alias 也算可调用名）。凭证里的 `prefix`（如 antigravity 的
-   `"prefix":"anti"`）会拼进名字（`anti/<模型名>`）：宿主注册的就是 `prefix + "/" + id`，`force-model-prefix: true`
-   时裸名根本不存在；被禁用的凭证宿主会整条注销，直接跳过。
-2. **宿主模型清单快照**（registry）：`response.intercept_after` 看到的每一份 `/v1/models` 响应，在过滤/放行之前
-   先把其中的 id 记进内存缓存。这是唯一能覆盖 OAuth 凭据模型（如 antigravity 的 `anti/*`）的来源 —— 这类模型
-   只存在于 provider 元数据里，凭证 JSON 没有 `models` 字段、`config.yaml` 也没有对应渠道。缓存是**内存态**：
-   宿主重启后为空，要等宿主出过一次 `/v1/models`（任何客户端拉一次即可）才填上；响应里用
-   `registry_seen_at` / `registry_models` 报告快照时间与条数，面板在缓存为空时会提示。
-3. **本插件启用组的调用名**（与 `model.register` 同一份快照）。
-
-面板把这份清单、`/model-prices/runtime-models`（CPAMP 的价格目录短名，宿主 8317 上不存在）与 `/config`（`config.yaml` 里声明的
-渠道模型）三者取并集：密钥写在 `config.yaml` 里的渠道在凭证文件里没有 `models` 字段，只有 `/config` 能拿到。
-`/config` 源只产出**宿主真会注册**的名字：`disabled: true` 的渠道整条跳过；有 `prefix` 的渠道只产出
-`prefix + "/" + (alias || name)`，不再额外产出裸名 —— 裸名在 `force-model-prefix: true` 下调用 404，关闭时也只是同一个模型
-的重复候选。
 
 ## 已知限制
 

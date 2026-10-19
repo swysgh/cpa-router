@@ -412,11 +412,11 @@ func normalizeGroupRefs(f groupFile, prefix string) (groupFile, []string) {
 
 // sortGroupsByName orders validated groups by internal name so /state and the
 // panel present a stable, source-independent list (a management save and a host
-// reload now agree on the order).
+// reload agree on the order).
 //
 // Callers MUST sort before publishing the slice under p.mu. Readers copy or walk
-// p.groups while holding only RLock (allGroupsSnapshot, callNameSnapshot,
-// resolveGroup), so reordering the backing array after the swap is a data race.
+// p.groups while holding only RLock, so reordering the backing array after the
+// swap is a data race.
 func sortGroupsByName(groups []group) {
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 }

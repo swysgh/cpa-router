@@ -54,7 +54,6 @@ cpa-router/
 ├── store.go              状态文件读写 + mtime 热加载
 ├── runtime.go            运行时状态：冷却/退避/统计/轮询指针
 ├── route.go              model.route 决策
-├── intercept.go          response.intercept_after（/v1/models 筛选）
 ├── executor.go           executor.execute（非流式）
 ├── stream.go             executor.execute_stream（流式）
 ├── management.go         管理路由与资源页注册、请求处理
@@ -153,7 +152,6 @@ plugins:
       all_cooling_policy: "wait" # wait | first | error
       max_wait: "15s"        # wait 策略的最长等待
       log_level: "info"      # debug | info | warn | error
-      filter_models: true    # /v1/models 只显示启用的 cpa-router 组调用名；false = 保留宿主全部模型
       cooldown:
         disable: false
         statuses: [429]              # 触发指数退避的状态码
@@ -448,7 +446,6 @@ func (e *hostError) StatusCode() int   // 返回 HTTPStatus，供 HTTPStatusFrom
   ],
   "routes": [
     {"Method": "GET",    "Path": "/plugins/cpa-router/state"},
-    {"Method": "GET",    "Path": "/plugins/cpa-router/models"},
     {"Method": "PUT",    "Path": "/plugins/cpa-router/groups"},
     {"Method": "POST",   "Path": "/plugins/cpa-router/groups"},
     {"Method": "DELETE", "Path": "/plugins/cpa-router/groups"},
@@ -467,7 +464,6 @@ func (e *hostError) StatusCode() int   // 返回 HTTPStatus，供 HTTPStatusFrom
 | 路由 | 请求 | 响应 |
 |---|---|---|
 | `GET /plugins/cpa-router/state` | — | `{version, plugin:{version,name}, config:{生效配置摘要}, state_file:{path, exists, mtime}, groups:[...], models:{<模型名>:{cooldown_until, cooldown_level, last_status, last_error, total, ok, fail, status_429, status_5xx, last_used_at, avg_latency_ms}}, now}` |
-| `GET /plugins/cpa-router/models` | — | `{"models":["<上游模型名>","<组调用名>",...]}`（去重、升序）；宿主回调异常时 500 `{"ok":false,"error":"中文原因"}` |
 | `PUT /plugins/cpa-router/groups` | `{"groups":[...]}` 全量替换 | 成功 `{"ok":true,"groups":N}`；校验失败 400 `{"ok":false,"error":"中文原因"}` |
 | `POST /plugins/cpa-router/groups` | `{"group":{...}}` 新增/按 name 覆盖 | 同上 |
 | `DELETE /plugins/cpa-router/groups?name=x` | — | 成功 `{"ok":true}`；不存在 404 |
@@ -522,10 +518,9 @@ function getKey(){return sessionStorage.getItem(SS_KEY)||readPanelKey()||readUrl
 4. 测试面板：选组 + prompt 输入 + 「发送」→ `POST /plugins/cpa-router/test`，展示状态码、耗时、每次尝试的成员/状态/冷却、响应前 500 字符。
 5. 保存成功后：调用一次 `PATCH /v0/management/plugins/cpa-router/config`，body `{"revision": "<Date.now()>"}`，让宿主重新注册模型列表（失败不报错，只在提示条里说明「模型列表需重启或手动刷新才会更新」）。
 6. 所有写操作后重新拉 `GET /plugins/cpa-router/state` 刷新界面；错误用顶部提示条展示（中文）。
-7. 模型候选（`loadModelNames()`，打开编辑弹窗时懒加载一次）取三个来源的并集（去重、升序），任一失败不影响其它：`GET /plugins/cpa-router/models`（首选：凭证声明的模型 + 宿主模型清单快照 + 本插件组调用名）、`GET /model-prices/runtime-models`（CPAMP 的价格目录短名，非可调模型 id；宿主 8317 上不存在）、`GET /config`（`config.yaml` 里声明的渠道模型 —— 密钥写在 config 里的渠道在凭证文件里没有 `models` 字段，只有这里能拿到）。候选必须是宿主真会注册的可调用名：`/config` 源对 `disabled: true` 的渠道整条跳过；有 `prefix` 的渠道只产出 `prefix + "/" + (alias || name)`，不再额外产出裸名（宿主 `applyModelPrefixes` 在 `force-model-prefix: true` 下只注册前缀名，裸名调用 404；关闭时裸名也只是同一模型的重复候选）。凭证源同理：凭证的 `prefix` 拼进名字，被禁用的凭证跳过。 清单里还有一份**宿主模型清单快照**：`response.intercept_after` 把每份 `/v1/models` 响应里的 id 在过滤前记进内存缓存 —— 这是 OAuth 凭据模型（antigravity 的 `anti/*`，只存在于 provider 元数据里、凭证 JSON 无 `models` 字段、config 也无对应渠道）唯一的来源；缓存是内存态，宿主重启后要等一次 `/v1/models` 才填上，响应里用 `registry_seen_at` / `registry_models` 报告，面板在为空时给出提示。
 
 ### 验收
-- 单测：`management.handle` 对 7 条路由的分发（含 404 未知路径、PUT 非法 body → 400）。
+- 单测：`management.handle` 对 6 条路由的分发（含 404 未知路径、PUT 非法 body → 400）。
 - 人工：部署后浏览器打开 `/v0/resource/plugins/cpa-router/panel`，截图/文本确认页面渲染出组列表（无 `undefined`/`NaN`）。
 
 ---
@@ -648,95 +643,3 @@ payload 既可能是裸 JSON（宿主的模型流未加 `data: ` 前缀，前缀
   落盘→重启→恢复；`stats_flush_interval` 的「有变化才写」；缺文件/坏文件不影响启动；
   `what=stats` 只清目标组；`/state` 暴露上述字段；面板确实渲染这些字段。
 - 回归：`validateConfig` 必须用指针接收者（见 §4 校验），否则自定义时长会被静默丢弃。
-
----
-
-## 16. `/v1/models` 筛选（v0.6.0 新增）
-
-### 16.1 为什么要筛
-
-组名通过 `model.register` 进了宿主的模型清单，所以客户端 `/v1/models` 里会**同时**看到组调用名
-和组背后那一堆上游模型名。上游模型名对调用组的人没有意义，还会诱导客户端绕过组直连 ——
-绕过就没有冷却/降级保护。因此默认把清单收窄到本插件自己的调用名。
-
-### 16.2 契约（CPA v8.0.13）
-
-- 能力：`plugin.register` 的 `capabilities.response_interceptor: true`；方法 `response.intercept_after`。
-- 输入：`rpcResponseInterceptRequest`（`pluginapi.ResponseInterceptRequest` 字段**扁平平铺**，
-  另加可选 `host_callback_id`），`Body` 是 base64（SDK 里是 `[]byte`）。宿主在
-  `WriteModelListResponse` 里以 `SourceFormat`、原始 JSON body、200、`Stream:false` 调统一
-  response interceptor，所以 `response.intercept_after` 也会收到普通响应的回调。
-- 输出：标准信封 `{ok:true,result:{Headers,Body,ClearHeaders}}`。**未修改时 `Body` 留空** ——
-  宿主只在 `len(resp.Body) > 0` 时覆盖当前 body，空 body 等于「保持现状」。
-- 插件返回 error 时 v8 宿主记 warning 并**跳过本插件**（响应照旧）；但 panic 会被 fuse，
-  所以任何路径都不许 panic。
-
-### 16.3 识别与过滤
-
-只在**能证明是 OpenAI 模型清单**时才改：`SourceFormat == "openai"`、`Body` 能解析成 JSON object、
-顶层 `object == "list"`、`data` 是数组。其余情况（Claude/Gemini 清单、普通 chat/completions
-响应、非法 JSON、缺 `object`/`data`、`data` 非数组、请求本身解析失败）一律 fail-open，
-返回空 `Body`。
-
-白名单 = 本插件**实际注册**的调用 ID：启用组的组名 + aliases，都带 `name_prefix`。它与
-`model.register` 走同一份受锁快照（`callNameSnapshot` + `forEachEnabledCallName`），
-所以「广告里有的」和「筛后留的」不可能不一致；禁用组及其 alias 不在内。
-
-只替换 `data`：
-
-- 根对象其它字段（宿主以后新增的也算）原样保留；
-- 保留的模型条目原字段（`created` / `owned_by` / 未知字段）原样保留；
-- 条目读不出字符串 `id` 时**保留**（无法证明是自己的，不能替别人删）；
-- 匹配 0 项输出合法的 `data: []`；
-- 没有任何条目被删时也返回空 `Body`，宿主原始字节不动。
-
-### 16.4 管理端放行（v0.7.0 新增）
-
-裁剪只针对 API 客户端。管理后台 / 面板拉 `/v1/models` 是为了让操作员挑模型，裁掉上游名等于让选型没法做。
-
-`ResponseInterceptRequest` 在 CPA v8.0.13 里**没有 URL 字段**，所以只能看 header：
-
-- `Referer` 含 `/management`、`/v0/management/` 或 `/v0/resource/plugins/` → 放行（面板以 iframe 嵌在
-  `/v0/resource/plugins/cpa-router/panel`；CPAMP 页面在 `/management` 下）；
-- `User-Agent` 含 `cpa-router-panel` 或 `cpamp-panel` → 放行（预留：宿主今天不注入该标记）。
-
-命中放行时 `filterModelList` 直接返回「未修改」，body 原样透传，效果等同 `filter_models: false`。
-
-已知边界（明确接受）：`Referer` / `User-Agent` 由客户端控制，持有有效 API key 的客户端伪造这两个头就能看到
-上游模型名。泄露面仅限模型名字符串（不含密钥、不含用量），而管理端真正需要的全量清单由
-`GET /plugins/cpa-router/models` 用管理密钥提供，不依赖这条放行。因此不引入额外配置项。
-
-### 16.5 模型发现端点（v0.7.0 新增）
-
-宿主没有「列出全部模型」的回调，所以 `GET /plugins/cpa-router/models` 用凭证拼出来：
-
-1. `host.auth.list` 拿全部 `HostAuthFileEntry`；
-2. 对每个 `auth_index` 调 `host.auth.get` 读凭证 JSON（`runtime_only` 条目没有落盘文件，宿主会报错，
-   跳过即可 —— 它们也没有 `models` 字段）；
-3. 解析凭证 JSON 的 `models`：支持 `["a","b"]` 与 `[{"name":"a","alias":"x"}]` 两种形态，
-   名字与 alias 都算可调用名，空白项丢弃；
-4. 并上本插件启用组的调用名（与 `model.register` 同一份 `callNameSnapshot`）；
-5. 去重、升序返回 `{"models":[...]}`。
-
-`host.auth.list` 本身失败属于宿主故障，返回 500 `{"ok":false,"error":"枚举凭证模型失败: ..."}`；
-单个凭证读不出来只跳过，不影响整体。响应只含模型名字符串，不回传凭证 JSON。
-
-### 16.6 配置与暴露面
-
-- `filter_models: bool`，默认 `true`（opt-out：不写就开，只有显式 `false` 关）。关闭后完全不动响应。
-- `Metadata.ConfigFields` 里声明为 `boolean`，由 CPA 通用插件配置界面渲染；面板不另做写入 UI，
-  只在「生效配置」摘要里显示当前值（`/state` 的 `config.filter_models`）。
-- 没有任何组时白名单为空 → `/v1/models` 返回空数组，属预期；要保留宿主全部模型就关掉开关。
-
-### 16.7 验收
-
-- 单测：默认开 / 显式关；只保留启用组名、alias、带前缀的调用名；禁用组与成员模型被删；
-  无匹配得 `data: []`；根字段与模型额外字段保留；`filter=false`、非法 JSON、非 list、
-  缺/非数组 `data`、坏条目、非 openai `SourceFormat` 全部原样透传；普通 response 不变；
-  畸形 RPC 请求仍返回 ok 空 body；白名单与 `model.register` 结果一致；能力声明与方法 dispatch；
-  reconfigure 后开关即时生效；`-race` 下与 reconfigure 并发无竞态。
-- 单测（v0.7.0）：`Referer` 含 `/management` / `/v0/management/` / `/v0/resource/plugins/` 或
-  `User-Agent` 含面板标记时 body 原样透传；无这些头的普通客户端仍被裁剪；
-  `GET /plugins/cpa-router/models` 合并凭证 `models`（两种形态）与组调用名、去重升序、
-  跳过读不出的凭证、`auth.list` 失败返回 500、空目录返回 `[]`。
-- `go test -race ./...` 全绿；`make build` 产出 `bin/cpa-router.so`。

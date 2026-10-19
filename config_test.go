@@ -25,32 +25,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Cooldown.Base != "30s" {
 		t.Errorf("cooldown.base default = %q", cfg.Cooldown.Base)
 	}
-	if !cfg.FilterModels {
-		t.Error("filter_models must default to true (only an explicit false turns it off)")
-	}
-}
-
-// filter_models is opt-out: an absent key keeps the filter on, an explicit false
-// (or true) is honoured.
-func TestDecodeConfigFilterModels(t *testing.T) {
-	cases := []struct {
-		yaml string
-		want bool
-	}{
-		{"", true},
-		{"name_prefix: \"r/\"\n", true},
-		{"filter_models: true\n", true},
-		{"filter_models: false\n", false},
-	}
-	for _, c := range cases {
-		cfg, err := decodeConfig([]byte(c.yaml))
-		if err != nil {
-			t.Fatalf("decodeConfig(%q): %v", c.yaml, err)
-		}
-		if cfg.FilterModels != c.want {
-			t.Errorf("yaml %q: filter_models = %v, want %v", c.yaml, cfg.FilterModels, c.want)
-		}
-	}
 }
 
 func TestDecodeConfigInvalidFields(t *testing.T) {
