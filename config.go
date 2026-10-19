@@ -27,18 +27,26 @@ type config struct {
 	// stats_file (they are also written once on load/interval ticks).
 	StatsFlushInterval string `yaml:"stats_flush_interval"`
 
+	// UsageReportURL / UsageReportKeyFile enable the CPAMP usage import: the
+	// host drops usage for nested executions, so the plugin is the only one
+	// that can make group traffic visible on the CPAMP dashboard.
+	UsageReportURL      string `yaml:"usage_report_url"`
+	UsageReportKeyFile  string `yaml:"usage_report_key_file"`
+	UsageReportInterval string `yaml:"usage_report_interval"`
+
 	Cooldown cooldownConfig `yaml:"cooldown"`
 
 	// Parsed durations (filled by decodeConfig / validateConfig).
-	ReloadIntervalDur     time.Duration `yaml:"-"`
-	AttemptTimeoutDur     time.Duration `yaml:"-"`
-	TotalTimeoutDur       time.Duration `yaml:"-"`
-	MaxWaitDur            time.Duration `yaml:"-"`
-	StatsFlushIntervalDur time.Duration `yaml:"-"`
-	CooldownBase          time.Duration `yaml:"-"`
-	CooldownMax           time.Duration `yaml:"-"`
-	CooldownTransientBase time.Duration `yaml:"-"`
-	CooldownTransientMax  time.Duration `yaml:"-"`
+	ReloadIntervalDur      time.Duration `yaml:"-"`
+	AttemptTimeoutDur      time.Duration `yaml:"-"`
+	TotalTimeoutDur        time.Duration `yaml:"-"`
+	MaxWaitDur             time.Duration `yaml:"-"`
+	StatsFlushIntervalDur  time.Duration `yaml:"-"`
+	UsageReportIntervalDur time.Duration `yaml:"-"`
+	CooldownBase           time.Duration `yaml:"-"`
+	CooldownMax            time.Duration `yaml:"-"`
+	CooldownTransientBase  time.Duration `yaml:"-"`
+	CooldownTransientMax   time.Duration `yaml:"-"`
 }
 
 // cooldownConfig holds the exponential-backoff parameters (durations as strings).
@@ -58,17 +66,18 @@ type cooldownConfig struct {
 // defaultConfig returns the documented default configuration.
 func defaultConfig() config {
 	cfg := config{
-		StateFile:          "plugins/cpa-router/groups.yaml",
-		StatsFile:          "plugins/cpa-router/stats.json",
-		NamePrefix:         "",
-		ReloadInterval:     "2s",
-		MaxAttempts:        6,
-		AttemptTimeout:     "120s",
-		TotalTimeout:       "600s",
-		AllCoolingPolicy:   "wait",
-		MaxWait:            "15s",
-		LogLevel:           "info",
-		StatsFlushInterval: "30s",
+		StateFile:           "plugins/cpa-router/groups.yaml",
+		StatsFile:           "plugins/cpa-router/stats.json",
+		NamePrefix:          "",
+		ReloadInterval:      "2s",
+		MaxAttempts:         6,
+		AttemptTimeout:      "120s",
+		TotalTimeout:        "600s",
+		AllCoolingPolicy:    "wait",
+		MaxWait:             "15s",
+		LogLevel:            "info",
+		StatsFlushInterval:  "30s",
+		UsageReportInterval: "5s",
 		Cooldown: cooldownConfig{
 			Disable:           false,
 			Statuses:          []int{429},
@@ -91,6 +100,7 @@ func defaultConfig() config {
 	cfg.TotalTimeoutDur = 600 * time.Second
 	cfg.MaxWaitDur = 15 * time.Second
 	cfg.StatsFlushIntervalDur = 30 * time.Second
+	cfg.UsageReportIntervalDur = 5 * time.Second
 	cfg.CooldownBase = 30 * time.Second
 	cfg.CooldownMax = 30 * time.Minute
 	cfg.CooldownTransientBase = 15 * time.Second
@@ -166,6 +176,16 @@ func validateConfig(cfg *config) error {
 	if err != nil {
 		return err
 	}
+	if cfg.UsageReportURL != "" && cfg.UsageReportKeyFile == "" {
+		return fmt.Errorf("配置错误: usage_report_key_file: 配置了 usage_report_url 时必须提供密钥文件")
+	}
+	if cfg.UsageReportKeyFile != "" && cfg.UsageReportURL == "" {
+		return fmt.Errorf("配置错误: usage_report_url: 配置了 usage_report_key_file 时必须提供上报地址")
+	}
+	uri, err := parseDurationField("usage_report_interval", cfg.UsageReportInterval, false)
+	if err != nil {
+		return err
+	}
 	cb, err := parseDurationField("cooldown.base", cfg.Cooldown.Base, false)
 	if err != nil {
 		return err
@@ -231,6 +251,7 @@ func validateConfig(cfg *config) error {
 	cfg.TotalTimeoutDur = tt
 	cfg.MaxWaitDur = mw
 	cfg.StatsFlushIntervalDur = sfi
+	cfg.UsageReportIntervalDur = uri
 	cfg.CooldownBase = cb
 	cfg.CooldownMax = cm
 	cfg.CooldownTransientBase = ctb

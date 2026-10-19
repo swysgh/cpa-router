@@ -114,7 +114,26 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {}
+func cliproxyPluginShutdown() {
+	if globalPlugin == nil {
+		return
+	}
+	globalPlugin.shutdown()
+}
+
+// shutdown stops background workers: the usage reporter (flushing any queued
+// events) and the stats flusher. Called by the host on plugin unload.
+func (p *plugin) shutdown() {
+	p.mu.RLock()
+	reporter := p.usageReporter
+	p.mu.RUnlock()
+	if reporter != nil {
+		reporter.stop()
+		p.usageReporterWG.Wait()
+	}
+	p.stopStatsFlusher()
+	_ = p.flushTokenStats()
+}
 
 // writeResponse copies raw bytes into a C-allocated buffer owned by the host.
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {

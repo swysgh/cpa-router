@@ -152,6 +152,9 @@ plugins:
       all_cooling_policy: "wait" # wait | first | error
       max_wait: "15s"        # wait 策略的最长等待
       log_level: "info"      # debug | info | warn | error
+      usage_report_url: ""   # CPAMP 用量补报地址（如 http://cpa-manager-plus:18317/v0/management/usage/import），空 = 不补报
+      usage_report_key_file: "" # 管理密钥文件路径（如 /run/secrets/cpamp_admin_key）
+      usage_report_interval: "5s" # 补报批量发送间隔
       cooldown:
         disable: false
         statuses: [429]              # 触发指数退避的状态码
@@ -643,3 +646,20 @@ payload 既可能是裸 JSON（宿主的模型流未加 `data: ` 前缀，前缀
   落盘→重启→恢复；`stats_flush_interval` 的「有变化才写」；缺文件/坏文件不影响启动；
   `what=stats` 只清目标组；`/state` 暴露上述字段；面板确实渲染这些字段。
 - 回归：`validateConfig` 必须用指针接收者（见 §4 校验），否则自定义时长会被静默丢弃。
+
+### 15.6 CPAMP 用量补报（v0.6.0）
+
+嵌套执行的用量被宿主两头丢弃（§15.1），插件是唯一能让组流量出现在 CPAMP 看板上的角色。
+补报遵循 qoder 插件的先例：
+
+- **触发**：`usage_report_url` + `usage_report_key_file` 都非空才启用；两者必须成对配置。
+- **判据（只补报外层）**：外层组请求的 `ExecutorRequest.Metadata` 无 `source` 键；被嵌套调用时
+  宿主会写 `source=plugin_host_model_callback`，此时由外层插件负责上报，这里跳过（否则双计）。
+- **事件字段**：schema 抄 `GET /v0/management/usage/export`；`provider=cpa-router`、
+  `model=成员名`、`requested_model=宿主给的 requested_model`（即组调用名）、`source="cpa-router:<组名>"`。
+- **通道**：异步 + 有界队列（256 条）+ 溢出丢弃计数；批量 JSONL POST（≤64 条/批），
+  失败指数退避（上限 60s），绝不阻塞请求路径；`plugin.shutdown` 时尽力 drain。
+- **覆盖**：非流式成功/失败、流式成功（失败成员在预检阶段就被换掉，不单独补报）。
+
+验收：JSONL 线格式与鉴权头；队列有界不阻塞；嵌套判据；reconfigure 换 reporter 不泄漏
+goroutine；配置成对校验。

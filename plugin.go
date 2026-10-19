@@ -51,6 +51,11 @@ type plugin struct {
 	statsLastFlush     time.Time
 	statsFlushedWrites int64
 
+	// usageReporter posts group-request usage to CPAMP's usage import. nil
+	// unless usage_report_url is configured.
+	usageReporter   *usageReporter
+	usageReporterWG sync.WaitGroup
+
 	lastReload time.Time
 }
 
@@ -153,6 +158,33 @@ func (p *plugin) configure(raw []byte) error {
 		p.loadTokenStats()
 	}
 	p.startStatsFlusher()
+
+	// Usage reporter lifecycle: stop the old one (reconfigure must not leak a
+	// goroutine), then start a fresh one when configured.
+	p.mu.Lock()
+	oldReporter := p.usageReporter
+	p.usageReporter = nil
+	var newReporter *usageReporter
+	if cfg.UsageReportURL != "" && cfg.UsageReportKeyFile != "" {
+		newReporter = newUsageReporter(cfg.UsageReportURL, cfg.UsageReportKeyFile, cfg.UsageReportIntervalDur)
+		p.usageReporter = newReporter
+	}
+	reporterEnabled := newReporter != nil
+	p.mu.Unlock()
+	if oldReporter != nil {
+		oldReporter.stop()
+		p.usageReporterWG.Wait()
+	}
+	if newReporter != nil {
+		p.usageReporterWG.Add(1)
+		go func(r *usageReporter) {
+			defer p.usageReporterWG.Done()
+			r.run(p.log, p.rt.now)
+		}(newReporter)
+	}
+	if reporterEnabled {
+		p.log.info("usage 补报已启用", map[string]any{"url": cfg.UsageReportURL, "interval": cfg.UsageReportInterval})
+	}
 
 	// Load state file (best-effort; keep empty groups on failure).
 	p.reloadGroups()
@@ -309,7 +341,7 @@ func (p *plugin) registrationJSON() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             "cpa-router",
-			Version:          "0.5.1",
+			Version:          "0.6.0",
 			Author:           "swysgh",
 			GitHubRepository: "https://github.com/swysgh/cpa-router",
 			Logo:             "",
@@ -325,6 +357,9 @@ func (p *plugin) registrationJSON() registration {
 				{Name: "all_cooling_policy", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"wait", "first", "error"}, Description: "整组冷却时的策略"},
 				{Name: "max_wait", Type: pluginapi.ConfigFieldTypeString, Description: "all_cooling_policy=wait 时的最长等待"},
 				{Name: "log_level", Type: pluginapi.ConfigFieldTypeString, Description: "debug|info|warn|error"},
+				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPAMP 用量补报地址（如 http://cpa-manager-plus:18317/v0/management/usage/import），空 = 不补报"},
+				{Name: "usage_report_key_file", Type: pluginapi.ConfigFieldTypeString, Description: "管理密钥文件路径（如 /run/secrets/cpamp_admin_key）"},
+				{Name: "usage_report_interval", Type: pluginapi.ConfigFieldTypeString, Description: "用量补报批量发送间隔，如 5s"},
 			},
 		},
 		Capabilities: registrationCapability{

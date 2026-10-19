@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -34,6 +35,15 @@ type streamForwardCtx struct {
 	Headers  http.Header
 	Query    url.Values
 	Alt      string
+}
+
+// usageReportCtx carries the outer-request identity for usage reporting through
+// the streaming path (the forwarding goroutine has no access to the original
+// executor request).
+type usageReportCtx struct {
+	requestedModel string
+	nested         bool
+	start          time.Time
 }
 
 // executeStream implements executor.execute_stream (§8.4).
@@ -85,6 +95,11 @@ func (p *plugin) executeStreamTraced(raw []byte, trace *[]attemptTrace) ([]byte,
 		Query:    req.Query,
 		Alt:      req.Alt,
 	}
+	usageCtx := &usageReportCtx{
+		requestedModel: metadataString(req.Metadata, "requested_model"),
+		nested:         isNestedExecution(req.Metadata),
+		start:          startTime,
+	}
 
 	// Synchronous pre-check: try each member's host stream until one returns 2xx.
 	// Doing this before returning headers means an exhausted group surfaces a real
@@ -124,7 +139,7 @@ func (p *plugin) executeStreamTraced(raw []byte, trace *[]attemptTrace) ([]byte,
 		return nil, err
 	}
 
-	go p.forwardStream(g, attempts, hitIndex, hitStreamID, fwd, pluginStreamID, req.HostCallbackID)
+	go p.forwardStream(g, attempts, hitIndex, hitStreamID, fwd, pluginStreamID, req.HostCallbackID, usageCtx)
 
 	return respHeader, nil
 }
@@ -204,7 +219,7 @@ func (p *plugin) openMemberStream(g *group, member string, fwd streamForwardCtx,
 // forwardStream relays the already-open host stream (attempts[hitIndex]) to the
 // plugin stream. While no payload has been delivered it may degrade to the
 // remaining members; after the first payload the result is terminal (§8.4).
-func (p *plugin) forwardStream(g *group, attempts []string, hitIndex int, firstStreamID string, fwd streamForwardCtx, pluginStreamID, hostCallbackID string) {
+func (p *plugin) forwardStream(g *group, attempts []string, hitIndex int, firstStreamID string, fwd streamForwardCtx, pluginStreamID, hostCallbackID string, usageCtx *usageReportCtx) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			p.closePluginStream(pluginStreamID, fmt.Sprintf("stream orchestration panic: %v", rec))
@@ -222,7 +237,7 @@ func (p *plugin) forwardStream(g *group, attempts []string, hitIndex int, firstS
 			streamID = id
 		}
 
-		emitted, failedEarly := p.relayMemberStream(g, member, streamID, pluginStreamID)
+		emitted, failedEarly := p.relayMemberStream(g, member, streamID, pluginStreamID, usageCtx)
 		p.closeHostModelStream(streamID)
 		streamID = ""
 
@@ -250,7 +265,7 @@ func (p *plugin) forwardStream(g *group, attempts []string, hitIndex int, firstS
 // emitted AND the plugin stream was left open (so the caller may degrade to the
 // next member). In every other case the plugin stream is closed and the result
 // is terminal.
-func (p *plugin) relayMemberStream(g *group, member, hostStreamID, pluginStreamID string) (emitted bool, failedEarly bool) {
+func (p *plugin) relayMemberStream(g *group, member, hostStreamID, pluginStreamID string, usageCtx *usageReportCtx) (emitted bool, failedEarly bool) {
 	// Usage is collected across the whole member stream and recorded once when
 	// it ends: providers that split one request's counters over several frames
 	// (claude: input tokens in message_start, output tokens in message_delta)
@@ -262,6 +277,9 @@ func (p *plugin) relayMemberStream(g *group, member, hostStreamID, pluginStreamI
 	defer func() {
 		if haveUsage {
 			p.rt.recordTokens(g.Name, member, usage)
+		}
+		if usageCtx != nil && !usageCtx.nested {
+			p.reportUsage(usageCtx.requestedModel, g.Name, member, true, usage, p.rt.now().Sub(usageCtx.start), 0, false, 0)
 		}
 	}()
 

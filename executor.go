@@ -320,6 +320,9 @@ func (p *plugin) executeTraced(raw []byte, trace *[]attemptTrace) ([]byte, error
 			cd := p.rt.recordCooldown(member, status, callErr.Error(), p.cfg)
 			p.rt.recordFailure(member, status)
 			lastStatus = orStatus(status, lastStatus)
+			if !isNestedExecution(req.Metadata) {
+				p.reportUsage(metadataString(req.Metadata, "requested_model"), g.Name, member, false, tokenUsage{}, p.rt.now().Sub(attemptStart), 0, true, status)
+			}
 			recordAttemptTrace(trace, attemptTrace{
 				Member: member, Status: status, Error: callErr.Error(),
 				CooldownS: int(cd.Seconds()),
@@ -338,6 +341,9 @@ func (p *plugin) executeTraced(raw []byte, trace *[]attemptTrace) ([]byte, error
 			cd := p.rt.recordCooldown(member, resp.StatusCode, "", p.cfg)
 			p.rt.recordFailure(member, resp.StatusCode)
 			lastStatus = orStatus(resp.StatusCode, lastStatus)
+			if !isNestedExecution(req.Metadata) {
+				p.reportUsage(metadataString(req.Metadata, "requested_model"), g.Name, member, false, tokenUsage{}, p.rt.now().Sub(attemptStart), 0, true, resp.StatusCode)
+			}
 			recordAttemptTrace(trace, attemptTrace{
 				Member: member, Status: resp.StatusCode,
 				CooldownS: int(cd.Seconds()),
@@ -356,6 +362,10 @@ func (p *plugin) executeTraced(raw []byte, trace *[]attemptTrace) ([]byte, error
 		// for a group request: the host skips usage publishing for nested
 		// executions, so nothing downstream ever sees these tokens.
 		p.recordTokens(g.Name, member, resp.Body)
+		if !isNestedExecution(req.Metadata) {
+			u, _ := extractUsage(resp.Body)
+			p.reportUsage(metadataString(req.Metadata, "requested_model"), g.Name, member, false, u, elapsed, elapsed, false, 0)
+		}
 		recordAttemptTrace(trace, attemptTrace{
 			Member: member, Status: http.StatusOK,
 			LatencyMS: int(elapsed.Milliseconds()),

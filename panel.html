@@ -333,7 +333,7 @@
     <div class="ovs-item"><div class="ovs-num" id="ovGroups">0</div><div class="ovs-lab">组</div></div>
     <div class="ovs-item"><div class="ovs-num" id="ovMembers">0</div><div class="ovs-lab">成员</div></div>
     <div class="ovs-item"><div class="ovs-num" id="ovCool">0</div><div class="ovs-lab">冷却中成员</div></div>
-    <div class="ovs-item"><div class="ovs-num" id="ovReqs">0</div><div class="ovs-lab">累计请求</div></div>
+    <div class="ovs-item"><div class="ovs-num" id="ovReqs">0</div><div class="ovs-lab">请求（本次运行）</div></div>
     <div class="ovs-item"><div class="ovs-num" id="ovTokens">0</div><div class="ovs-lab">累计 tokens</div></div>
   </section>
 
@@ -612,10 +612,10 @@ function groupCard(g, models){
   enTxt.textContent=g.enabled?"启用":"禁用";
   head.appendChild(enTxt);
   const stats=document.createElement("div"); stats.className="cstats sub";
-  stats.textContent="组请求 "+n(g.group_total)+" · 成功 "+n(g.group_ok)+" · 失败 "+n(g.group_fail)
+  stats.textContent="组请求 "+n(g.group_total)+" · 成功 "+n(g.group_ok)+" · 失败 "+n(g.group_fail)+"（本次运行）"
     +"　成员 "+members.length+"（冷却 "+cool+"）"
     +"　tokens "+fmtTokens(n(g.group_total_tokens))
-    +"（入 "+fmtTokens(n(g.group_input_tokens))+" / 出 "+fmtTokens(n(g.group_output_tokens))+"）";
+    +"（入 "+fmtTokens(n(g.group_input_tokens))+" / 出 "+fmtTokens(n(g.group_output_tokens))+"，累计）";
   // The member list is a CSS grid so every row's columns line up; names are the
   // only user data here, and they go through esc().
   let html="";
