@@ -376,6 +376,7 @@ func (p *plugin) registrationJSON() registration {
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPAMP 用量补报地址（如 http://cpa-manager-plus:18317/v0/management/usage/import），空 = 不补报"},
 				{Name: "usage_report_key_file", Type: pluginapi.ConfigFieldTypeString, Description: "管理密钥文件路径（如 /run/secrets/cpamp_admin_key）"},
 				{Name: "usage_report_interval", Type: pluginapi.ConfigFieldTypeString, Description: "用量补报批量发送间隔，如 5s"},
+				{Name: "cooldown.not_found", Type: pluginapi.ConfigFieldTypeString, Description: "上游 404（模型不存在）的固定冷却时长，如 5m；0 = 不冷却"},
 				{Name: "sticky", Type: pluginapi.ConfigFieldTypeBoolean, Description: "轮询组的粘性会话：同一会话固定打同一成员（仅 round-robin 生效）"},
 				{Name: "sticky_ttl", Type: pluginapi.ConfigFieldTypeString, Description: "粘性会话有效期（命中即续期），如 30m"},
 				{Name: "sticky_headers", Type: pluginapi.ConfigFieldTypeArray, Description: "会话标识请求头，按顺序取第一个非空值"},
@@ -396,7 +397,7 @@ func (p *plugin) registrationJSON() registration {
 
 // pluginVersion is the single source of truth for the version reported to the
 // host (registration) and to the panel (/state).
-const pluginVersion = "0.10.0"
+const pluginVersion = "0.11.0"
 
 // modelProviderName is the provider key the plugin registers its models under.
 const modelProviderName = "cpa-router"

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 )
@@ -103,16 +104,81 @@ func TestCoolingIsScopedPerModelName(t *testing.T) {
 
 // TestNonCooldownStatusesAreRetried documents the deliberate boundary: statuses
 // outside cooldown.statuses / transient_statuses get stats only, so a member
-// that fails with, say, 400 keeps its slot.
+// that fails with, say, 400 keeps its slot. 404 is excluded on purpose: it has
+// its own fixed window (see TestNotFoundGetsFixedShortCooldown).
 func TestNonCooldownStatusesAreRetried(t *testing.T) {
 	p := newTestPlugin(t, groups3RoundRobin(), defaultConfig())
-	for _, st := range []int{400, 404, 200} {
+	for _, st := range []int{400, 405, 409, 200} {
 		if d := p.rt.recordCooldown("m1", st, "", *p.conf()); d != 0 {
 			t.Fatalf("status %d produced a %s cooldown, want none", st, d)
 		}
 	}
 	if p.rt.isCooling("m1") {
 		t.Fatal("m1 cooling after non-cooldown statuses")
+	}
+}
+
+// TestNotFoundGetsFixedShortCooldown pins the 404 policy: a fixed window that
+// takes the member out of the rotation, without inflating the 429 backoff level
+// (a wrong model name must not make a later rate limit look worse).
+func TestNotFoundGetsFixedShortCooldown(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	p := newTestPlugin(t, groups3RoundRobin(), defaultConfig())
+	p.rt.setClock(func() time.Time { return clock })
+
+	d := p.rt.recordCooldown("m1", 404, "", *p.conf())
+	if d != 5*time.Minute {
+		t.Fatalf("404 cooldown = %s, want the configured 5m", d)
+	}
+	if !p.rt.isCooling("m1") {
+		t.Fatal("404 did not take the member out of the rotation")
+	}
+	if lvl := p.rt.coolingInfo("m1").Level; lvl != 0 {
+		t.Fatalf("404 bumped the backoff level to %d, want 0", lvl)
+	}
+	// Repeated 404s must not escalate either.
+	for i := 0; i < 3; i++ {
+		if d := p.rt.recordCooldown("m1", 404, "", *p.conf()); d != 5*time.Minute {
+			t.Fatalf("repeated 404 cooldown = %s, want a flat 5m", d)
+		}
+	}
+	clock = clock.Add(5*time.Minute + time.Second)
+	if p.rt.isCooling("m1") {
+		t.Fatal("404 window did not lapse")
+	}
+	// A success clears it immediately.
+	p.rt.recordCooldown("m1", 404, "", *p.conf())
+	p.rt.recordSuccess("m1", time.Millisecond)
+	if p.rt.isCooling("m1") {
+		t.Fatal("success did not clear the 404 window")
+	}
+}
+
+func TestNotFoundCooldownConfigurable(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Cooldown.NotFound = "0s"
+	cfg.CooldownNotFound = 0
+	p := newTestPlugin(t, groups3RoundRobin(), cfg)
+	if d := p.rt.recordCooldown("m1", 404, "", cfg); d != 0 {
+		t.Fatalf("cooldown.not_found=0 produced %s, want no cooldown", d)
+	}
+}
+
+// TestCooldownDisableIsHonoured catches the documented kill switch being a dead
+// config: with cooldown.disable the member must never leave the pool even after
+// a 429, while stats still count the failure.
+func TestCooldownDisableIsHonoured(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Cooldown.Disable = true
+	p := newTestPlugin(t, groups3RoundRobin(), cfg)
+	if d := p.rt.recordCooldown("m1", 429, "", cfg); d != 0 {
+		t.Fatalf("cooldown.disable still produced %s", d)
+	}
+	if p.rt.isCooling("m1") {
+		t.Fatal("m1 cooling although cooldown.disable is true")
+	}
+	if d := p.rt.recordCooldown("m1", 404, "", cfg); d != 0 {
+		t.Fatalf("cooldown.disable still produced a 404 window of %s", d)
 	}
 }
 

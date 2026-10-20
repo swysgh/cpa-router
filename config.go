@@ -57,6 +57,7 @@ type config struct {
 	CooldownMax            time.Duration `yaml:"-"`
 	CooldownTransientBase  time.Duration `yaml:"-"`
 	CooldownTransientMax   time.Duration `yaml:"-"`
+	CooldownNotFound       time.Duration `yaml:"-"`
 }
 
 // cooldownConfig holds the exponential-backoff parameters (durations as strings).
@@ -71,6 +72,11 @@ type cooldownConfig struct {
 	TransientBase     string  `yaml:"transient_base"`
 	TransientFactor   float64 `yaml:"transient_factor"`
 	TransientMax      string  `yaml:"transient_max"`
+	// NotFound is the fixed cooldown for 404 (model does not exist upstream).
+	// Short and non-escalating on purpose: retrying a wrong model name cannot
+	// start working, and a long/permanent ban would hide a transient upstream
+	// deployment hiccup. Empty/0 disables it.
+	NotFound string `yaml:"not_found"`
 }
 
 // defaultConfig returns the documented default configuration.
@@ -110,6 +116,7 @@ func defaultConfig() config {
 			TransientBase:     "15s",
 			TransientFactor:   2.0,
 			TransientMax:      "5m",
+			NotFound:          "5m",
 		},
 	}
 	// Populate parsed durations. These MUST stay consistent with the string
@@ -127,6 +134,7 @@ func defaultConfig() config {
 	cfg.CooldownMax = 30 * time.Minute
 	cfg.CooldownTransientBase = 15 * time.Second
 	cfg.CooldownTransientMax = 5 * time.Minute
+	cfg.CooldownNotFound = 5 * time.Minute
 	return cfg
 }
 
@@ -240,6 +248,10 @@ func validateConfig(cfg *config) error {
 	if err != nil {
 		return err
 	}
+	cnf, err := parseDurationField("cooldown.not_found", cfg.Cooldown.NotFound, true)
+	if err != nil {
+		return err
+	}
 
 	if cfg.MaxAttempts < 0 {
 		return fmt.Errorf("配置错误: max_attempts: 必须 >= 0")
@@ -295,6 +307,7 @@ func validateConfig(cfg *config) error {
 	cfg.CooldownMax = cm
 	cfg.CooldownTransientBase = ctb
 	cfg.CooldownTransientMax = ctm
+	cfg.CooldownNotFound = cnf
 	return nil
 }
 

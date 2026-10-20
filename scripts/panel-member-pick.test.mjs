@@ -535,5 +535,30 @@ await run("非加权组：weight 输入框存在但不进 body", async () => {
   deepEq(lastGroupBody().group.members[0], { model: "ink/glm-5.3", enabled: true });
 });
 
+await run("weight 列只在 weighted-round-robin 显示（fallback 组不显示）", async () => {
+  // fallback：容器不带 weighted 类，权重输入被禁用
+  sandbox.openModal({
+    name: "fb", call_name: "fb", strategy: "fallback", enabled: true,
+    description: "", aliases: [],
+    members: [{ type: "model", name: "ink/glm-5.3", enabled: true }],
+  });
+  await flush();
+  if (els.members.classList.contains("weighted")) throw new Error("fallback 组不应带 weighted 类");
+  const wf = memberRows()[0].querySelector(".m-weight");
+  if (!wf) throw new Error("成员行缺 .m-weight 节点");
+  if (!wf.disabled) throw new Error("fallback 组里 weight 输入应为 disabled");
+
+  // 切到 weighted-round-robin：同一批行立刻启用
+  document.getElementById("f_strategy").value = "weighted-round-robin";
+  document.getElementById("f_strategy").onchange();
+  if (!els.members.classList.contains("weighted")) throw new Error("切到加权后没有 weighted 类");
+  if (memberRows()[0].querySelector(".m-weight").disabled) throw new Error("切到加权后 weight 仍是 disabled");
+
+  // 再切回 round-robin：重新禁用
+  document.getElementById("f_strategy").value = "round-robin";
+  document.getElementById("f_strategy").onchange();
+  if (memberRows()[0].querySelector(".m-weight").disabled !== true) throw new Error("切回轮询后 weight 未禁用");
+});
+
 console.log(`PASS ${pass} / FAIL ${fail}`);
 process.exit(fail ? 1 : 0);

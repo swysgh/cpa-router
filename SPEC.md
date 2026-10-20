@@ -170,6 +170,7 @@ plugins:
         transient_base: "15s"
         transient_factor: 2.0
         transient_max: "5m"
+        not_found: "5m"              # 404（模型不存在）的固定冷却；0 = 不冷却
 ```
 
 校验规则（任一不满足 → 返回中文错误信封，格式 `配置错误: <字段>: <原因>`）：
@@ -315,17 +316,27 @@ expand(groupName, depth, visited, stickyKey):
 状态按**模型名**全局维护（同一模型被多个组引用时共享冷却）：
 
 ```
-cooldown[model] = {until, level, lastStatus, lastError, lastAt}
+cooldown[model] = {until, level, lastStatus, lastError, lastAt, notFoundUntil}
 ```
+
+两个**互相独立**的时间窗：`until` 是退避阶梯（429/5xx/传输错误），`notFoundUntil` 是 404 的固定窗。
+`isCooling` 取两者的并集，所以任一窗外都算冷却中。分开放是为了让「配错的模型名」不会抬高
+「真限流」的退避等级。
 
 - 命中 `cooldown.statuses`（默认 429）时：
   `level += 1`；`delay = min(base * factor^(level-1), max)`；`delay *= 1 + rand(-jitter, +jitter)`；
   `until = now + delay`。
   例（默认参数）：30s → 60s → 120s → 240s → … → 封顶 30m。
 - 命中 `transient_statuses`（5xx）或**无状态码的调用错误/超时**时：用 `transient_*` 参数做同样的退避。
-- 其它 4xx（400/401/403/404/405 等）：**只记统计，不冷却**，继续尝试下一个成员。
+- **404（上游没有这个模型）**：固定冷却 `cooldown.not_found`（默认 `5m`），**不走退避阶梯**
+  （`level` 不变），重复 404 也不会累加。理由：模型名配错重试永远不会成功，而每次轮询都先打一次
+  必然 404 的成员 = 白等一个往返；同时固定窗不会像 12h 永久禁用那样掩盖上游临时发版故障。
+  `cooldown.not_found: 0s` 可关掉这条规则（退回「只记统计」）。
+- 其它 4xx（400/401/402/403/405 等）：**只记统计，不冷却**，继续尝试下一个成员。
+  （401/402/403 若要冷却，显式加进 `cooldown.statuses`——线上就是这么配的。）
 - 成功（2xx）时：`level = 0`、清除冷却、`until = 0`。
-- 冷却是否生效看 `now < until`；`cooldown.disable == true` 时永不冷却（仍会尝试下一个成员）。
+- 冷却是否生效看 `now < until || now < notFoundUntil`；`cooldown.disable == true` 时**任何**失败都不冷却
+  （仍会尝试下一个成员，只记统计）。
 - 冷却时长取整到秒写进日志与 UI。
 
 ### 7.4 整组冷却时的策略（`all_cooling_policy`）

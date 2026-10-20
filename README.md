@@ -22,7 +22,8 @@
   绑定 `sticky_ttl` 内有效、命中即续期，绑定成员进冷却会自动改绑。已知限制见 SPEC §7.2。
 - **429 移除 + 指数退避**：某成员返回 429（或配置的 `cooldown.statuses`）时把它从可用
   池里**摘掉**（冷却），冷却时长按指数退避增长；冷却中的成员不会被选中（除非整组都在
-  冷却，见 `all_cooling_policy`）。
+  冷却，见 `all_cooling_policy`）。上游 404（模型不存在）也会摘掉，但用独立固定窗
+  `cooldown.not_found`（默认 5m、不累加），避免配错模型名时每轮都先撞一次必失败。
 - **UI**：CPA 管理面板里出现「模型路由」菜单，可视化增删改查组、看冷却/统计、发测试请求。
 - **管理 API + 资源页**：`/v0/resource/.../panel` 单文件面板，`/v0/management/...` 下
   提供 state / groups 增删改 / reset / test 接口。
@@ -68,6 +69,7 @@
          sticky_body_fingerprint: true # 无会话头时用对话根做指纹
          cooldown:
            disable: false
+           not_found: "5m"              # 404 固定冷却；0 = 不冷却
            statuses: [429]              # 触发指数退避的状态码
            base: "30s"
            factor: 2.0

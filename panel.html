@@ -216,6 +216,9 @@
     font-size: .78rem; padding: .1rem .3rem;
   }
   .mrow .m-weight.off { opacity: .45; }
+  /* Weight only means something for weighted-round-robin: the modal hides the
+     column for fallback/round-robin instead of showing a dead input. */
+  #members:not(.weighted) .m-weight { display: none; }
   .mrow .icon {
     display: inline-flex; align-items: center; justify-content: center;
     min-width: 24px; min-height: 24px; padding: 0 .3rem; line-height: 1;
@@ -861,6 +864,7 @@ function openModal(g){
   document.getElementById("f_enabled").checked = g?g.enabled:true;
   const mc=document.getElementById("members"); mc.innerHTML="";
   if(g&&g.members){g.members.forEach(m=>addMemberRow(m.name,m.enabled,m.weight));}
+  syncWeightColumn();
   renumberRows();
   ensureModelNames();
   refreshDatalists();
@@ -886,6 +890,17 @@ function moveRow(row, delta){
   if(i<0||j<0||j>=rows.length) return;
   if(delta<0) mc.insertBefore(row, rows[j]); else mc.insertBefore(rows[j], row);
   renumberRows();
+}
+// The weight column exists only for weighted-round-robin; showing it elsewhere
+// invites the user to type a number that is either rejected (round-robin) or
+// silently ignored (fallback).
+function syncWeightColumn(){
+  const mc=document.getElementById("members");
+  const sel=document.getElementById("f_strategy");
+  if(!mc||!sel) return;
+  const weighted=sel.value==="weighted-round-robin";
+  mc.classList.toggle("weighted", weighted);
+  [...mc.querySelectorAll(".m-weight")].forEach(el=>{ el.disabled=!weighted; });
 }
 function addMemberRow(name, enabled, weight){
   const mc=document.getElementById("members");
@@ -1079,6 +1094,9 @@ document.addEventListener("keydown",e=>{
   }
 });
 document.getElementById("addMember").onclick=openPicker;
+// Switching strategy re-shows/hides the weight column immediately, so the
+// input only ever appears where it is honoured.
+document.getElementById("f_strategy").onchange=syncWeightColumn;
 document.getElementById("pickDone").onclick=()=>closePicker();
 document.getElementById("pickClose").onclick=()=>closePicker();
 document.getElementById("pickSearch").oninput=renderPickList;

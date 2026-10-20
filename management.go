@@ -189,16 +189,24 @@ func (p *plugin) handleState(req managementRequest) (*pluginapi.ManagementRespon
 	now := p.rt.now()
 	for name, st := range stats {
 		cd := cooldowns[name]
+		// Two independent windows: the backoff ladder (Until) and the fixed
+		// 404 window (NotFoundUntil). The panel must show the one that is
+		// actually keeping the member out, otherwise a 404-cooldown member looks
+		// available while it is being skipped.
+		activeUntil := cd.Until
+		if cd.NotFoundUntil.After(activeUntil) {
+			activeUntil = cd.NotFoundUntil
+		}
 		cdSecs := 0
-		if cd.Until.After(now) {
-			cdSecs = int(cd.Until.Sub(now).Seconds())
+		if activeUntil.After(now) {
+			cdSecs = int(activeUntil.Sub(now).Seconds())
 		}
 		var avgLatency int64
 		if st.LatencyN > 0 {
 			avgLatency = st.Latency.Milliseconds() / st.LatencyN
 		}
 		models[name] = map[string]any{
-			"cooldown_until": cd.Until.Unix(),
+			"cooldown_until": activeUntil.Unix(),
 			"cooldown_secs":  cdSecs,
 			"cooldown_level": cd.Level,
 			"last_status":    cd.LastStatus,

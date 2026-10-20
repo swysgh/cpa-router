@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"math/rand"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,10 @@ type cooldownState struct {
 	LastStatus int
 	LastError  string
 	LastAt     time.Time
+	// NotFoundUntil is the separate, non-escalating 404 window. It is kept
+	// apart from the backoff ladder so a wrong model name cannot inflate the
+	// level that governs real rate limits.
+	NotFoundUntil time.Time
 }
 
 // modelStat is the per-model usage statistic.
@@ -107,7 +112,8 @@ func (r *runtimeState) isCooling(model string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cds, ok := r.cooldowns[model]; ok {
-		return cds.Until.After(r.clock())
+		now := r.clock()
+		return cds.Until.After(now) || cds.NotFoundUntil.After(now)
 	}
 	return false
 }
@@ -138,8 +144,30 @@ func (r *runtimeState) recordCooldown(model string, status int, errMsg string, c
 	defer r.mu.Unlock()
 
 	now := r.clock()
+	if cfg.Cooldown.Disable {
+		// disable: failures are still recorded in stats, but nothing is taken
+		// out of the pool. Honouring the documented switch matters: it is the
+		// "always retry everything" emergency setting.
+		return 0
+	}
 	soft := containsInt(cfg.Cooldown.Statuses, status)
 	transient := containsInt(cfg.Cooldown.TransientStatuses, status) || (status == 0)
+
+	if status == http.StatusNotFound && cfg.CooldownNotFound > 0 {
+		// 404 = the model is not served upstream. Fixed window, no backoff: a
+		// typo in groups.yaml keeps failing, and burning a first-request failure
+		// on every rotation turn is pure latency for the client.
+		cds, ok := r.cooldowns[model]
+		if !ok {
+			cds = &cooldownState{}
+			r.cooldowns[model] = cds
+		}
+		cds.NotFoundUntil = now.Add(cfg.CooldownNotFound)
+		cds.LastStatus = status
+		cds.LastError = errMsg
+		cds.LastAt = now
+		return cfg.CooldownNotFound
+	}
 
 	if !soft && !transient {
 		// Other 4xx: only stats, no cooldown.
@@ -192,6 +220,7 @@ func (r *runtimeState) recordSuccess(model string, latency time.Duration) {
 	if cds, ok := r.cooldowns[model]; ok {
 		cds.Level = 0
 		cds.Until = time.Time{}
+		cds.NotFoundUntil = time.Time{}
 		cds.LastError = ""
 	}
 	st := r.stat(model)
